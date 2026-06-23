@@ -110,15 +110,43 @@ class MockLocationService : Service() {
         // 前台通知
         try { startForeground(NOTIFICATION_ID, buildNotification()) } catch (_: Exception) { }
 
-        // 1. 拦截器监听器 — 实时监听所有提供者
-        registerInterceptor()
+        // 0. ⭐ Fake Location 式 Provider Toggle 序列
+        // 关开 network → 关开 gps → 关开 network（复刻 Fake Location 的启动模式）
+        scope.launch {
+            // 等 setupProviders 稳定
+            delay(500)
 
-        // 2. 背景持续注入 — 每100ms
-        bgInjectJob?.cancel()
-        bgInjectJob = scope.launch {
-            while (isActive) {
-                injectToAllProviders()
-                delay(INJECT_BG_MS)
+            // 关开 network
+            try { locationManager.setTestProviderEnabled(NETWORK_PROVIDER, false) } catch (_: Exception) { }
+            delay(200)
+            try { locationManager.setTestProviderEnabled(NETWORK_PROVIDER, true) } catch (_: Exception) { }
+            delay(300)
+
+            // 关开 gps
+            try { locationManager.setTestProviderEnabled(GPS_PROVIDER, false) } catch (_: Exception) { }
+            delay(200)
+            try { locationManager.setTestProviderEnabled(GPS_PROVIDER, true) } catch (_: Exception) { }
+            delay(300)
+
+            // 再关开 network
+            try { locationManager.setTestProviderEnabled(NETWORK_PROVIDER, false) } catch (_: Exception) { }
+            delay(200)
+            try { locationManager.setTestProviderEnabled(NETWORK_PROVIDER, true) } catch (_: Exception) { }
+            delay(300)
+
+            // ⭐ Toggle 完成后：先注入一次，再注册拦截器，再启动背景注入
+            injectToAllProviders()
+            delay(100)
+            injectToAllProviders()
+
+            registerInterceptor()
+
+            bgInjectJob?.cancel()
+            bgInjectJob = scope.launch {
+                while (isActive) {
+                    injectToAllProviders()
+                    delay(INJECT_BG_MS)
+                }
             }
         }
     }
