@@ -151,11 +151,12 @@ class MockLocationService : Service() {
      * 让华为定位服务停止使用真实 GPS/WiFi
      */
     private fun enableHmsMockMode() {
-        if (!hmsHasHms || hmsFusedClient == null || hmsSetMockModeMethod == null) return
+        val client = hmsFusedClient ?: return
+        val method = hmsSetMockModeMethod ?: return
+        if (!hmsHasHms) return
 
         try {
-            val task = hmsSetMockModeMethod.invoke(hmsFusedClient, true) ?: return
-            // 等待异步任务完成（最多 3 秒）
+            val task = method.invoke(client, true) ?: return
             try {
                 hmsTaskWaitMethod?.invoke(task)
             } catch (_: Exception) { }
@@ -166,7 +167,9 @@ class MockLocationService : Service() {
      * 调用 HMS FusedLocationProviderClient.setMockLocation()
      */
     private fun injectHmsMockLocation(lat: Double, lon: Double) {
-        if (!hmsHasHms || hmsFusedClient == null || hmsSetMockLocationMethod == null) return
+        val client = hmsFusedClient ?: return
+        val method = hmsSetMockLocationMethod ?: return
+        if (!hmsHasHms) return
 
         try {
             val location = Location(LocationManager.GPS_PROVIDER).apply {
@@ -176,7 +179,7 @@ class MockLocationService : Service() {
                 this.time = System.currentTimeMillis()
                 this.elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
             }
-            val task = hmsSetMockLocationMethod.invoke(hmsFusedClient, location) ?: return
+            val task = method.invoke(client, location) ?: return
             try {
                 hmsTaskWaitMethod?.invoke(task)
             } catch (_: Exception) { }
@@ -187,9 +190,12 @@ class MockLocationService : Service() {
      * 关闭 HMS Mock 模式
      */
     private fun disableHmsMockMode() {
-        if (!hmsHasHms || hmsFusedClient == null || hmsSetMockModeMethod == null) return
+        val client = hmsFusedClient ?: return
+        val method = hmsSetMockModeMethod ?: return
+        if (!hmsHasHms) return
+
         try {
-            val task = hmsSetMockModeMethod.invoke(hmsFusedClient, false) ?: return
+            val task = method.invoke(client, false) ?: return
             try {
                 hmsTaskWaitMethod?.invoke(task)
             } catch (_: Exception) { }
