@@ -322,15 +322,15 @@ class MockLocationService : Service() {
                     try { locationManager.removeTestProvider(provider) } catch (_: Exception) { }
                     locationManager.addTestProvider(
                         provider,
-                        requiresNetwork = (provider == LocationManager.NETWORK_PROVIDER),
-                        requiresSatellite = (provider == LocationManager.GPS_PROVIDER),
-                        requiresCell = (provider == LocationManager.NETWORK_PROVIDER),
-                        hasMonetaryCost = false,
-                        supportsAltitude = true,
-                        supportsSpeed = true,
-                        supportsBearing = true,
-                        powerRequirement = Criteria.POWER_LOW,
-                        accuracyRequirement = Criteria.ACCURACY_FINE
+                        provider == LocationManager.NETWORK_PROVIDER,  // requiresNetwork
+                        provider == LocationManager.GPS_PROVIDER,      // requiresSatellite
+                        provider == LocationManager.NETWORK_PROVIDER,  // requiresCell
+                        false,                                          // hasMonetaryCost
+                        true,                                           // supportsAltitude
+                        true,                                           // supportsSpeed
+                        true,                                           // supportsBearing
+                        Criteria.POWER_LOW,                             // powerRequirement
+                        Criteria.ACCURACY_FINE                          // accuracyRequirement
                     )
                     locationManager.setTestProviderEnabled(provider, true)
                 } catch (_: Exception) { }
