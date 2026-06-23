@@ -107,6 +107,7 @@ class MockLocationService : Service() {
 
     // requestLocationUpdates 用
     private var isRegisteredLocationListener = false
+    private var locationListener: LocationListener? = null
 
     // 巡航数据
     private var routeLats = doubleArrayOf()
@@ -267,21 +268,28 @@ class MockLocationService : Service() {
     }
 
     /**
-     * 注册 LocationListener → requestSingleUpdate
-     * 让系统主动广播一次位置请求，强制所有监听位置变化的 App 拿到最新 mock 位置
+     * 注册 LocationListener，通过 requestLocationUpdates 0ms 0m
+     * 强制系统立即分发 mock 位置到所有监听该 Provider 的 App
+     * 确保地图 App 实时刷新显示 mock 位置
      */
     private fun registerLocationUpdates() {
         if (isRegisteredLocationListener) return
         try {
-            val listener = object : LocationListener {
+            locationListener = object : LocationListener {
                 override fun onLocationChanged(location: Location) { }
                 override fun onProviderEnabled(provider: String) { }
                 override fun onProviderDisabled(provider: String) { }
             }
-            // 对所有 provider 请求一次更新，强制系统分发 mock 位置
+            val listener = locationListener ?: return
             for (provider in PROVIDERS) {
                 try {
-                    locationManager.requestSingleUpdate(provider, listener, Looper.getMainLooper())
+                    locationManager.requestLocationUpdates(
+                        provider,
+                        0L,
+                        0f,
+                        listener,
+                        Looper.getMainLooper()
+                    )
                 } catch (_: Exception) { }
             }
             isRegisteredLocationListener = true

@@ -20,29 +20,18 @@ class MainActivity : ComponentActivity() {
     ) { _ -> }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        try {
-            super.onCreate(savedInstanceState)
-        } catch (e: Exception) {
-            // 防止极端情况下的闪退
-        }
-
-        // 请求通知权限（Android 13+, 避免首次启动前台服务闪退）
+        super.onCreate(savedInstanceState)
         requestRequiredPermissions()
-
         setContent {
-            try {
-                MaterialTheme(
-                    colorScheme = MaterialTheme.colorScheme
+            MaterialTheme(
+                colorScheme = MaterialTheme.colorScheme
+            ) {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
                 ) {
-                    Surface(
-                        modifier = Modifier.fillMaxSize(),
-                        color = MaterialTheme.colorScheme.background
-                    ) {
-                        MainScreen()
-                    }
+                    MainScreen()
                 }
-            } catch (e: Exception) {
-                // 防止 Compose 初始化异常导致闪退
             }
         }
     }
@@ -50,7 +39,7 @@ class MainActivity : ComponentActivity() {
     private fun requestRequiredPermissions() {
         val permissionsToRequest = mutableListOf<String>()
 
-        // Android 13+ 需要 POST_NOTIFICATIONS 前台服务通知
+        // Android 13+ 需要 POST_NOTIFICATIONS — 前台服务通知必须请求
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(
                     this, Manifest.permission.POST_NOTIFICATIONS
@@ -60,13 +49,12 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // Android 10+ 前台服务定位权限
+        // Android 10+ 后台定位权限
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             if (ContextCompat.checkSelfPermission(
                     this, Manifest.permission.ACCESS_BACKGROUND_LOCATION
                 ) != PackageManager.PERMISSION_GRANTED
             ) {
-                // 只请求，不强制（后台定位权限需用户手动授权）
                 permissionsToRequest.add(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
             }
         }
