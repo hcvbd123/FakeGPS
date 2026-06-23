@@ -40,7 +40,8 @@ android {
             isDebuggable = true
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("release")
+            // 不在这里配置 signingConfig — AGP 在 debuggable=true 时会跳过签名
+            // 改为 workflow 中手动 apksigner 签名
         }
     }
 

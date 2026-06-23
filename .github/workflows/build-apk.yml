@@ -38,8 +38,42 @@ jobs:
       - name: Build release APK
         run: gradle assembleRelease
 
+      - name: Sign APK with apksigner
+        run: |
+          APKSIGNER=$(find $ANDROID_SDK_ROOT -name "apksigner" -type f 2>/dev/null | head -1)
+          if [ -z "$APKSIGNER" ]; then
+            APKSIGNER="$ANDROID_SDK_ROOT/build-tools/34.0.0/apksigner"
+          fi
+          echo "Using: $APKSIGNER"
+
+          # When no signingConfig, AGP outputs *-unsigned.apk
+          UNSIGNED=app/build/outputs/apk/release/app-release-unsigned.apk
+          SIGNED=app/build/outputs/apk/release/app-release-signed.apk
+
+          if [ ! -f "$UNSIGNED" ]; then
+            # Fallback: maybe it named it app-release.apk without signing
+            UNSIGNED=app/build/outputs/apk/release/app-release.apk
+          fi
+
+          echo "Unsigned APK: $(ls -lh $UNSIGNED 2>/dev/null || echo 'NOT FOUND')"
+
+          $APKSIGNER sign \
+            --ks app/release.keystore \
+            --ks-pass pass:android123 \
+            --ks-key-alias fakegps \
+            --key-pass pass:android123 \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out "$SIGNED" \
+            "$UNSIGNED"
+
+          echo ""
+          echo "=== Signature verification ==="
+          $APKSIGNER verify --print-certs "$SIGNED"
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: virtual-gps-release
-          path: app/build/outputs/apk/release/app-release.apk
+          path: app/build/outputs/apk/release/app-release-signed.apk
