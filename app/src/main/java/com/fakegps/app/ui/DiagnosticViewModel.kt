@@ -92,12 +92,13 @@ class DiagnosticViewModel : ViewModel() {
             }
 
             override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {
-                val statusMap = mapOf(
-                    LocationManager.OUT_OF_SERVICE to "OUT_OF_SERVICE",
-                    LocationManager.TEMPORARILY_UNAVAILABLE to "TEMPORARILY_UNAVAILABLE",
-                    LocationManager.AVAILABLE to "AVAILABLE"
-                )
-                addLog("📡 $provider 状态: ${statusMap[status] ?: status.toString()}")
+                val statusStr = when (status) {
+                    0 -> "OUT_OF_SERVICE"
+                    1 -> "TEMPORARILY_UNAVAILABLE"
+                    2 -> "AVAILABLE"
+                    else -> status.toString()
+                }
+                addLog("📡 $provider 状态: $statusStr")
                 updateProviderStates(lm)
             }
         }
