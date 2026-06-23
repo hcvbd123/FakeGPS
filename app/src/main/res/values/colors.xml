@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="primary">#1976D2</color>
-    <color name="primary_dark">#1565C0</color>
-    <color name="accent">#FF4081</color>
+    <color name="ic_launcher_background">#3C78DC</color>
+    <color name="primary">#3C78DC</color>
+    <color name="primary_variant">#1A5276</color>
+    <color name="secondary">#F39C12</color>
+    <color name="white">#FFFFFF</color>
+    <color name="black">#000000</color>
 </resources>
