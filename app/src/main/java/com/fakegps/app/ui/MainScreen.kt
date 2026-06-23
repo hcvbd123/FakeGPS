@@ -26,7 +26,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.fakegps.app.service.MockLocationService
 import com.fakegps.app.utils.FloatingWindowService
 import kotlin.math.roundToInt
 
@@ -56,18 +55,10 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
     ) { }
 
     var showIntervalDialog by remember { mutableStateOf(false) }
-    var showKmlFileList by remember { mutableStateOf(false) }
 
     // 首次加载时扫描 KML 文件夹
     LaunchedEffect(Unit) {
         viewModel.scanKmlFolder(context)
-    }
-
-    // 模拟停止后恢复状态
-    LaunchedEffect(MockLocationService.isRunning) {
-        if (!MockLocationService.isRunning && state.isStarted) {
-            viewModel.stopSimulation(context)
-        }
     }
 
     Scaffold(
@@ -177,7 +168,7 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                             Button(
                                 onClick = { viewModel.startSimulation(context) },
                                 modifier = Modifier.weight(if (isTablet) 3f else 2f),
-                                enabled = !MockLocationService.isRunning && state.checkedSet.isNotEmpty()
+                                enabled = !state.isStarted && state.checkedSet.isNotEmpty()
                             ) {
                                 Icon(
                                     if (state.checkedSet.size >= 2) Icons.Default.Route
@@ -194,7 +185,7 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                             }
 
                             // 停止按钮（运行时显示）
-                            if (MockLocationService.isRunning) {
+                            if (state.isStarted) {
                                 FilledTonalButton(
                                     onClick = {
                                         viewModel.stopSimulation(context)
@@ -263,14 +254,13 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
             }
 
             // ==================== 模拟状态卡片 ====================
-            if (MockLocationService.isRunning) {
-                val (lat, lon) = MockLocationService.getCurrentLocation()
+            if (state.isStarted) {
                 val bgColor = if (state.isRouteMode)
                     MaterialTheme.colorScheme.tertiaryContainer
                 else MaterialTheme.colorScheme.primaryContainer
                 val icon = if (state.isRouteMode) Icons.Default.Route else Icons.Default.MyLocation
                 val title = if (state.isRouteMode)
-                    "🚗 巡航中: ${MockLocationService.routeIndex + 1}/${MockLocationService.routeTotal}"
+                    "🚗 巡航中: ${state.routeProgress}"
                 else "📍 单点模拟中"
                 Card(
                     modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
@@ -289,7 +279,7 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                         Spacer(Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(title, fontWeight = FontWeight.Bold)
-                            Text("%.6f, %.6f".format(lat, lon),
+                            Text("%.6f, %.6f".format(state.currentLat, state.currentLon),
                                 fontSize = if (isTablet) 14.sp else 13.sp)
                         }
                     }
