@@ -54,7 +54,4 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
     implementation("androidx.navigation:navigation-compose:2.7.6")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.2")
-
-    // 不直接依赖 HMS SDK——通过反射调用 FusedLocationProviderClient
-    // 避免额外配置 agconnect-services.json 和 Maven 仓库
 }
