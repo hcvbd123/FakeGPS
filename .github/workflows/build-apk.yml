@@ -28,9 +28,7 @@ jobs:
           gradle-version: 8.5
 
       - name: 编译 APK
-        run: |
-          chmod +x gradlew
-          gradle assembleDebug
+        run: gradle assembleDebug
 
       - name: 上传 APK
         uses: actions/upload-artifact@v4
