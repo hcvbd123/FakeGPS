@@ -11,9 +11,10 @@ import kotlinx.coroutines.*
 
 /**
  * 模拟定位前台服务
- * 支持单点定位 + 多坐标自动巡航
+ * 支持单点定位 + 多坐标自动巡航 + 摇杆方向控制
  *
- * 巡航模式：按选定顺序依次模拟，每个坐标停留 5~25 分钟随机
+ * 摇杆控制：仅在单点模拟模式可用（巡航模式下禁用）
+ * 速度：15米/秒
  */
 class MockLocationService : Service() {
 
@@ -28,15 +29,21 @@ class MockLocationService : Service() {
         const val EXTRA_LAT = "lat"
         const val EXTRA_LON = "lon"
         const val EXTRA_ALT = "alt"
-        const val EXTRA_LATS = "lats"       // double array
-        const val EXTRA_LONS = "lons"       // double array
-        const val EXTRA_NAMES = "names"     // string array
+        const val EXTRA_LATS = "lats"
+        const val EXTRA_LONS = "lons"
+        const val EXTRA_NAMES = "names"
         const val EXTRA_INTERVAL_MIN = "interval_min"
         const val EXTRA_INTERVAL_MAX = "interval_max"
+
+        // 15 米/秒的恒定速度
+        private const val SPEED_MPS = 15.0
+        // 1 度纬度 ≈ 111111 米
+        private const val METER_PER_DEGREE_LAT = 111111.0
 
         private var currentLat = 0.0
         private var currentLon = 0.0
         private var currentAlt = 0.0
+        private var currentBearing = 0f
 
         /** 巡航状态 */
         var routeTotal = 0
@@ -50,9 +57,25 @@ class MockLocationService : Service() {
         var isRouteMode = false
             private set
 
-        fun isMocking(): Boolean = isRunning
+        // 摇杆控制状态
+        private var joystickActive = false
+        private var joystickAngle = 0.0  // 0°=北，顺时针
 
+        fun isMocking(): Boolean = isRunning
         fun getCurrentLocation(): Pair<Double, Double> = Pair(currentLat, currentLon)
+        fun isJoystickActive(): Boolean = joystickActive && isRunning && !isRouteMode
+
+        /** 从悬浮窗更新摇杆方向 */
+        fun setJoystickDirection(angle: Double, active: Boolean) {
+            joystickActive = active
+            joystickAngle = angle
+        }
+
+        /** 重置摇杆 */
+        fun resetJoystick() {
+            joystickActive = false
+            joystickAngle = 0.0
+        }
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -79,6 +102,7 @@ class MockLocationService : Service() {
                 val lon = intent.getDoubleExtra(EXTRA_LON, 0.0)
                 val alt = intent.getDoubleExtra(EXTRA_ALT, 0.0)
                 isRouteMode = false
+                resetJoystick()
                 startMocking(lat, lon, alt)
             }
             ACTION_START_ROUTE -> {
@@ -89,6 +113,7 @@ class MockLocationService : Service() {
                 intervalMax = intent.getIntExtra(EXTRA_INTERVAL_MAX, 25)
                 if (routeLats.isNotEmpty()) {
                     isRouteMode = true
+                    resetJoystick()
                     routeTotal = routeLats.size
                     routeIndex = 0
                     startRoute()
@@ -112,11 +137,9 @@ class MockLocationService : Service() {
                 currentLat = lat
                 currentLon = lon
 
-                // 通知栏显示当前状态
                 val notification = buildNotification()
                 startForeground(NOTIFICATION_ID, notification)
 
-                // 持续上报位置（每秒一次）
                 val dwellJob = launch {
                     while (isActive) {
                         reportMockLocation(lat, lon, 0.0, 18.0f)
@@ -124,13 +147,11 @@ class MockLocationService : Service() {
                     }
                 }
 
-                // 停留时间（最后一个点停留到手动停止）
                 if (i == routeLats.size - 1) {
                     dwellJob.join()
                     break
                 }
 
-                // 随机延迟 5~25 分钟
                 val delayMs = (intervalMin * 60 + Math.random() * (intervalMax - intervalMin) * 60).toLong() * 1000
                 delay(delayMs)
                 dwellJob.cancel()
@@ -142,6 +163,7 @@ class MockLocationService : Service() {
         currentLat = lat
         currentLon = lon
         currentAlt = alt
+        currentBearing = 0f
         isRunning = true
         routeTotal = 0
         routeIndex = 0
@@ -153,7 +175,24 @@ class MockLocationService : Service() {
         mockJob?.cancel()
         mockJob = scope.launch {
             while (isActive) {
-                reportMockLocation(lat, lon, alt, 18.0f)
+                // 摇杆方向移动（仅在非巡航模式可用）
+                if (joystickActive && !isRouteMode) {
+                    val rad = Math.toRadians(joystickAngle)
+                    // 0°=北 → dy为正, dx为0
+                    // cos(rad) = north component, sin(rad) = east component
+                    val dyMeters = SPEED_MPS * Math.cos(rad)    // 向北为正
+                    val dxMeters = SPEED_MPS * Math.sin(rad)    // 向东为正
+
+                    val latDelta = dyMeters / METER_PER_DEGREE_LAT
+                    val lonDelta = dxMeters / (METER_PER_DEGREE_LAT *
+                        Math.cos(Math.toRadians(currentLat)))
+
+                    currentLat += latDelta
+                    currentLon += lonDelta
+                    currentBearing = joystickAngle.toFloat()
+                }
+
+                reportMockLocation(currentLat, currentLon, currentAlt, 18.0f)
                 delay(1000)
             }
         }
@@ -168,7 +207,7 @@ class MockLocationService : Service() {
         val content = if (isRouteMode) {
             "📍 ${routeName}  (%.5f, %.5f)".format(currentLat, currentLon)
         } else {
-            "纬度: %.5f  经度: %.5f".format(currentLat, currentLon)
+            "%.5f, %.5f".format(currentLat, currentLon)
         }
         return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle(title)
@@ -181,6 +220,7 @@ class MockLocationService : Service() {
     private fun stopMocking() {
         isRunning = false
         isRouteMode = false
+        resetJoystick()
         mockJob?.cancel()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -193,6 +233,8 @@ class MockLocationService : Service() {
                 this.longitude = lon
                 this.altitude = alt
                 this.accuracy = accuracy
+                this.bearing = currentBearing
+                this.speed = if (isJoystickActive()) SPEED_MPS.toFloat() else 0f
                 this.time = System.currentTimeMillis()
                 this.elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
             }
@@ -207,6 +249,7 @@ class MockLocationService : Service() {
     override fun onDestroy() {
         scope.cancel()
         isRunning = false
+        resetJoystick()
         super.onDestroy()
     }
 
