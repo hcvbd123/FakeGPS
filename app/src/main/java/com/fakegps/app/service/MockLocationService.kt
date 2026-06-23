@@ -86,7 +86,8 @@ class MockLocationService : Service() {
                     method.isAccessible = true
                     sSetIsFromMockProviderMethod = method
                 }
-                method.invoke(location, false)
+                // method 在 if 块后已确保非空，但 Kotlin 无法跨 try 推导，加 !! 断言
+                method!!.invoke(location, false)
             } catch (_: Exception) {
                 // 反射失败时静默忽略 — 位置仍然能注入，只是标记可能为 true
             }
