@@ -27,11 +27,11 @@ jobs:
         with:
           gradle-version: 8.5
 
-      - name: 编译 APK
-        run: gradle assembleDebug
+      - name: 编译 APK (release, 移除 testOnly 标志)
+        run: gradle assembleRelease
 
       - name: 上传 APK
         uses: actions/upload-artifact@v4
         with:
-          name: 虚拟GPS-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: 虚拟GPS-release
+          path: app/build/outputs/apk/release/app-release.apk

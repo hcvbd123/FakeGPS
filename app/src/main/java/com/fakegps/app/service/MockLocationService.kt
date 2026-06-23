@@ -14,13 +14,10 @@ import kotlinx.coroutines.*
  * 模拟定位前台服务
  * 支持单点定位 + 多坐标自动巡航 + 摇杆方向控制
  *
- * 摇杆控制：仅在单点模拟模式可用（巡航模式下禁用）
- * 速度：15米/秒
- *
- * 模拟策略：
- * 1. 同时mock GPS + Network + Passive 三个 Provider
- * 2. 每秒同时向三个 Provider 注入坐标
- * 3. 覆盖尽可能多的 App 定位方式
+ * 模拟策略（对标 Fake Location No-Root 模式）：
+ * 同时向 GPS + Network + Passive 三个 Provider 每秒注入位置
+ * Location 对象模拟完整属性（精度、速度、方向、时间）
+ * 让各种 App（GPS定位、基站/WiFi定位、混合定位）都能收到
  */
 class MockLocationService : Service() {
 
@@ -41,7 +38,6 @@ class MockLocationService : Service() {
         const val EXTRA_INTERVAL_MIN = "interval_min"
         const val EXTRA_INTERVAL_MAX = "interval_max"
 
-        // 15 米/秒
         private const val SPEED_MPS = 15.0
         private const val METER_PER_DEGREE_LAT = 111111.0
 
@@ -78,7 +74,7 @@ class MockLocationService : Service() {
             joystickAngle = 0.0
         }
 
-        /** 需要 mock 的 Provider 列表 */
+        /** 需要 mock 的 Provider */
         private val PROVIDERS = arrayOf(
             LocationManager.GPS_PROVIDER,
             LocationManager.NETWORK_PROVIDER,
@@ -101,47 +97,6 @@ class MockLocationService : Service() {
         super.onCreate()
         createNotificationChannel()
         locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
-    }
-
-    /**
-     * 同时设置 GPS + Network + Passive 三个测试提供者
-     * 确保覆盖所有 App 的定位方式（Google Play 服务、系统定位、原生 GPS 等）
-     */
-    private fun setupAllTestProviders() {
-        for (provider in PROVIDERS) {
-            try {
-                if (locationManager.getProvider(provider) != null) {
-                    locationManager.removeTestProvider(provider)
-                }
-            } catch (_: Exception) { }
-
-            try {
-                locationManager.addTestProvider(
-                    provider,
-                    false,    // requiresNetwork
-                    false,    // requiresSatellite
-                    false,    // requiresCell
-                    false,    // hasMonetaryCost
-                    true,     // supportsAltitude
-                    true,     // supportsSpeed
-                    true,     // supportsBearing
-                    android.location.Criteria.POWER_LOW,
-                    android.location.Criteria.ACCURACY_FINE
-                )
-                locationManager.setTestProviderEnabled(provider, true)
-            } catch (_: Exception) { }
-        }
-    }
-
-    /**
-     * 清理所有测试提供者
-     */
-    private fun removeAllTestProviders() {
-        for (provider in PROVIDERS) {
-            try {
-                locationManager.removeTestProvider(provider)
-            } catch (_: Exception) { }
-        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -196,7 +151,6 @@ class MockLocationService : Service() {
 
                 updateNotification()
 
-                // 持续上报位置至所有 Provider（每秒一次）
                 val dwellJob = launch {
                     while (isActive) {
                         injectToAllProviders(lat, lon, 0.0)
@@ -204,13 +158,11 @@ class MockLocationService : Service() {
                     }
                 }
 
-                // 最后一个点持续等待
                 if (i == routeLats.size - 1) {
                     dwellJob.join()
                     break
                 }
 
-                // 随机延迟 5~25 分钟
                 val delayMs = (intervalMin * 60L +
                     (Math.random() * (intervalMax - intervalMin) * 60).toLong()) * 1000L
                 delay(delayMs)
@@ -258,7 +210,7 @@ class MockLocationService : Service() {
 
     /**
      * 核心方法：同时向 GPS + Network + Passive 三个 Provider 注入位置
-     * 确保任何 App（无论是用哪种 Provider 获取位置）都能收到
+     * 对标 Fake Location No-Root 模式的实现方式
      */
     private fun injectToAllProviders(lat: Double, lon: Double, alt: Double) {
         val time = System.currentTimeMillis()
@@ -270,9 +222,11 @@ class MockLocationService : Service() {
                     this.latitude = lat
                     this.longitude = lon
                     this.altitude = alt
+                    // 模拟高精度定位（通常真实 GPS 精度 8-20 米）
                     this.accuracy = 18.0f
                     this.bearing = currentBearing
-                    this.speed = if (isJoystickActive()) SPEED_MPS.toFloat() else 0f
+                    this.speed = if (joystickActive && !isRouteMode) SPEED_MPS.toFloat() else 0f
+                    // 时间戳必须设置，某些 App 用时间判断位置是否"新鲜"
                     this.time = time
                     this.elapsedRealtimeNanos = elapsedNs
                 }
@@ -281,8 +235,42 @@ class MockLocationService : Service() {
                 // 未授权
             } catch (e: IllegalArgumentException) {
                 // Provider 未设置 → 重试
-                setupAllTestProviders()
+                try {
+                    locationManager.removeTestProvider(provider)
+                } catch (_: Exception) { }
+                try {
+                    locationManager.addTestProvider(
+                        provider,
+                        false, false, false, false,
+                        true, true, true,
+                        android.location.Criteria.POWER_LOW,
+                        android.location.Criteria.ACCURACY_FINE
+                    )
+                    locationManager.setTestProviderEnabled(provider, true)
+                } catch (_: Exception) { }
             } catch (_: Exception) { }
+        }
+    }
+
+    private fun setupAllTestProviders() {
+        for (provider in PROVIDERS) {
+            try {
+                try { locationManager.removeTestProvider(provider) } catch (_: Exception) { }
+                locationManager.addTestProvider(
+                    provider,
+                    false, false, false, false,
+                    true, true, true,
+                    android.location.Criteria.POWER_LOW,
+                    android.location.Criteria.ACCURACY_FINE
+                )
+                locationManager.setTestProviderEnabled(provider, true)
+            } catch (_: Exception) { }
+        }
+    }
+
+    private fun removeAllTestProviders() {
+        for (provider in PROVIDERS) {
+            try { locationManager.removeTestProvider(provider) } catch (_: Exception) { }
         }
     }
 
@@ -332,11 +320,7 @@ class MockLocationService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "虚拟GPS服务",
-                NotificationManager.IMPORTANCE_LOW
-            )
+            val channel = NotificationChannel(CHANNEL_ID, "虚拟GPS服务", NotificationManager.IMPORTANCE_LOW)
             val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.createNotificationChannel(channel)
         }
