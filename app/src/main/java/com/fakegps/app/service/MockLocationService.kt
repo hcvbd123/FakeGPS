@@ -14,7 +14,19 @@ import kotlinx.coroutines.*
 import java.lang.reflect.Method
 
 /**
- * 模拟定位前台服务 — 简化版，聚焦核心功能
+ * 模拟定位前台服务 — v9 拦截器策略
+ *
+ * ⭐ 核心思路：
+ * 当真实GPS位置到达系统时，我们的 LocationListener 第一时间收到回调，
+ * 立即在回调中注入 mock 位置覆盖掉真实数据。
+ * 这样就算 HMS 融合引擎推送了真实坐标，我们在它到达 App 之前就替换了。
+ *
+ * 策略组合：
+ * 1. isDebuggable = true（还原，否则HarmonyOS不认mock）
+ * 2. 拦截器监听器 — 实时监控所有 provider，发现真实位置立即覆盖
+ * 3. 背景注入 100ms（保持持续覆盖）
+ * 4. 真实位置抵达瞬间，额外再以 10ms 快速连续注入 5 次（确保覆盖推送）
+ * 5. setIsFromMockProvider(false) 反射隐藏mock标记
  */
 class MockLocationService : Service() {
 
@@ -28,16 +40,17 @@ class MockLocationService : Service() {
         const val EXTRA_LAT = "lat"
         const val EXTRA_LON = "lon"
 
-        private val MOCK_PROVIDERS = listOf(
-            LocationManager.GPS_PROVIDER,
-            LocationManager.NETWORK_PROVIDER,
-            LocationManager.PASSIVE_PROVIDER
-        )
+        private val GPS_PROVIDER = LocationManager.GPS_PROVIDER
+        private val NETWORK_PROVIDER = LocationManager.NETWORK_PROVIDER
+        private val PASSIVE_PROVIDER = LocationManager.PASSIVE_PROVIDER
+        private val MOCK_PROVIDERS = listOf(PASSIVE_PROVIDER, GPS_PROVIDER, NETWORK_PROVIDER)
 
-        private const val INJECT_INTERVAL_MS = 50L
+        private const val INJECT_BG_MS = 100L       // 背景注入间隔
+        private const val BURST_COUNT = 5            // 拦截后爆发注入次数
+        private const val BURST_INTERVAL_MS = 10L    // 爆发注入间隔
         private const val MOCK_ACCURACY = 0.5f
 
-        // 反射缓存
+        // 反射隐藏 mock 标记
         private var sSetIsFromMockProviderMethod: Method? = null
         private fun hideMockFlag(location: Location) {
             try {
@@ -62,9 +75,9 @@ class MockLocationService : Service() {
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private var mockJob: Job? = null
+    private var bgInjectJob: Job? = null
     private lateinit var locationManager: LocationManager
-    private var locationListener: LocationListener? = null
+    private var realLocationListener: LocationListener? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -93,28 +106,77 @@ class MockLocationService : Service() {
         isRunning = true
 
         setupProviders()
-        registerListeners()
+
+        // 前台通知
         try { startForeground(NOTIFICATION_ID, buildNotification()) } catch (_: Exception) { }
 
-        // 50ms 注入循环
-        mockJob?.cancel()
-        mockJob = scope.launch {
+        // 1. 拦截器监听器 — 实时监听所有提供者
+        registerInterceptor()
+
+        // 2. 背景持续注入 — 每100ms
+        bgInjectJob?.cancel()
+        bgInjectJob = scope.launch {
             while (isActive) {
-                injectToAllProviders(currentLat, currentLon)
-                delay(INJECT_INTERVAL_MS)
+                injectToAllProviders()
+                delay(INJECT_BG_MS)
             }
         }
     }
 
-    private fun injectToAllProviders(lat: Double, lon: Double) {
+    /**
+     * 拦截器监听器。
+     * 当任何 provider 推送了真实位置，我们立即收到 onLocationChanged。
+     * 在这个回调中，我们立刻注入 mock 位置，不让真实数据扩散到 App。
+     *
+     * 额外效果：爆发注入 5 次（10ms间隔）确保覆盖所有 App 的位置缓存。
+     */
+    private val interceptor = object : LocationListener {
+        override fun onLocationChanged(location: Location) {
+            // 不管收到什么位置，立刻注入我们的 mock
+            injectToAllProviders()
+            // 爆发注入 5 次，10ms 间隔
+            scope.launch {
+                for (i in 0 until BURST_COUNT) {
+                    injectToAllProviders()
+                    delay(BURST_INTERVAL_MS)
+                }
+            }
+            updateNotification()
+        }
+        override fun onProviderEnabled(provider: String) {
+            // provider 被启用，重新注入确保我们的 mock 最新
+            injectToAllProviders()
+        }
+        override fun onProviderDisabled(provider: String) { }
+        override fun onStatusChanged(provider: String?, status: Int, extras: android.os.Bundle?) { }
+    }
+
+    private fun registerInterceptor() {
+        try {
+            realLocationListener?.let { locationManager.removeUpdates(it) }
+            realLocationListener = interceptor
+
+            for (provider in MOCK_PROVIDERS) {
+                // 0ms minTime — 有变化马上通知我们
+                locationManager.requestLocationUpdates(
+                    provider, 0L, 0f, interceptor, Looper.getMainLooper()
+                )
+            }
+        } catch (_: Exception) { }
+    }
+
+    /**
+     * 向所有 mock provider 注入当前位置
+     */
+    private fun injectToAllProviders() {
         val now = System.currentTimeMillis()
         val elapsedNs = SystemClock.elapsedRealtimeNanos()
 
         for (provider in MOCK_PROVIDERS) {
             try {
                 val location = Location(provider).apply {
-                    this.latitude = lat
-                    this.longitude = lon
+                    latitude = currentLat
+                    longitude = currentLon
                     altitude = 0.0
                     accuracy = MOCK_ACCURACY
                     bearing = 0f
@@ -125,13 +187,16 @@ class MockLocationService : Service() {
                 hideMockFlag(location)
                 locationManager.setTestProviderLocation(provider, location)
             } catch (_: Exception) {
-                try { locationManager.removeTestProvider(provider); } catch (_: Exception) { }
+                // provider 失效，重建（但只做 addTestProvider，不做 toggle）
                 try {
-                    val isGPS = provider == LocationManager.GPS_PROVIDER
+                    locationManager.removeTestProvider(provider)
+                } catch (_: Exception) { }
+                try {
                     locationManager.addTestProvider(
                         provider,
-                        !isGPS, isGPS, false, false,
-                        true, true, true,
+                        provider == NETWORK_PROVIDER,
+                        provider == GPS_PROVIDER,
+                        false, false, true, true, true,
                         android.location.Criteria.POWER_LOW,
                         android.location.Criteria.ACCURACY_FINE
                     )
@@ -145,32 +210,17 @@ class MockLocationService : Service() {
         for (provider in MOCK_PROVIDERS) {
             try { locationManager.removeTestProvider(provider) } catch (_: Exception) { }
             try {
-                val isGPS = provider == LocationManager.GPS_PROVIDER
                 locationManager.addTestProvider(
                     provider,
-                    !isGPS, isGPS, false, false,
-                    true, true, true,
+                    provider == NETWORK_PROVIDER,
+                    provider == GPS_PROVIDER,
+                    false, false, true, true, true,
                     android.location.Criteria.POWER_LOW,
                     android.location.Criteria.ACCURACY_FINE
                 )
                 locationManager.setTestProviderEnabled(provider, true)
             } catch (_: Exception) { }
         }
-    }
-
-    private fun registerListeners() {
-        try {
-            locationListener = object : LocationListener {
-                override fun onLocationChanged(location: Location) { }
-                override fun onProviderEnabled(provider: String) { }
-                override fun onProviderDisabled(provider: String) { }
-            }
-            for (provider in MOCK_PROVIDERS) {
-                locationManager.requestLocationUpdates(
-                    provider, 0L, 0f, locationListener!!, Looper.getMainLooper()
-                )
-            }
-        } catch (_: Exception) { }
     }
 
     private fun buildNotification(): Notification {
@@ -182,11 +232,18 @@ class MockLocationService : Service() {
             .build()
     }
 
+    private fun updateNotification() {
+        try {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.notify(NOTIFICATION_ID, buildNotification())
+        } catch (_: Exception) { }
+    }
+
     private fun stopMocking() {
         isRunning = false
-        mockJob?.cancel()
-        try { locationListener?.let { locationManager.removeUpdates(it) } } catch (_: Exception) { }
-        locationListener = null
+        bgInjectJob?.cancel()
+        try { realLocationListener?.let { locationManager.removeUpdates(it) } } catch (_: Exception) { }
+        realLocationListener = null
         for (p in MOCK_PROVIDERS) { try { locationManager.removeTestProvider(p) } catch (_: Exception) { } }
         try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) { }
         stopSelf()
@@ -195,7 +252,7 @@ class MockLocationService : Service() {
     override fun onDestroy() {
         scope.cancel()
         isRunning = false
-        try { locationListener?.let { locationManager.removeUpdates(it) } } catch (_: Exception) { }
+        try { realLocationListener?.let { locationManager.removeUpdates(it) } } catch (_: Exception) { }
         for (p in MOCK_PROVIDERS) { try { locationManager.removeTestProvider(p) } catch (_: Exception) { } }
         try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) { }
         super.onDestroy()
