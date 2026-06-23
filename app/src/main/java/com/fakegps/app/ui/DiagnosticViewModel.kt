@@ -103,18 +103,44 @@ class DiagnosticViewModel : ViewModel() {
             }
         }
 
-        try {
-            lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 0L, 0f, currentListener!!, Looper.getMainLooper())
-            lm.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 0L, 0f, currentListener!!, Looper.getMainLooper())
-            lm.requestLocationUpdates(LocationManager.PASSIVE_PROVIDER, 0L, 0f, currentListener!!, Looper.getMainLooper())
+        val providers = listOf(
+            LocationManager.GPS_PROVIDER,
+            LocationManager.NETWORK_PROVIDER,
+            LocationManager.PASSIVE_PROVIDER
+        )
 
-            // 尝试获取 Fused location provider
+        var successCount = 0
+        for (provider in providers) {
             try {
-                lm.requestLocationUpdates("fused", 0L, 0f, currentListener!!, Looper.getMainLooper())
-                addLog("  也监听了 fused provider")
-            } catch (_: Exception) { }
-        } catch (e: Exception) {
-            addLog("❌ 注册监听失败: ${e.message}")
+                lm.requestLocationUpdates(provider, 1000L, 0f, currentListener!!, Looper.getMainLooper())
+                successCount++
+                addLog("  ✅ 成功监听 $provider")
+            } catch (e: Exception) {
+                addLog("  ⚠️ $provider 监听失败: ${e.message}")
+            }
+        }
+
+        if (successCount == 0) {
+            addLog("❌ 所有 provider 都无法监听 (UID ${android.os.Process.myUid()})")
+            addLog("   提示：确认已授予位置权限")
+        } else {
+            addLog("✅ 成功监听 $successCount 个 provider")
+        }
+
+        // 尝试 Fused location provider（GMS）
+        try {
+            val fusedClass = Class.forName("com.google.android.gms.location.FusedLocationProviderClient")
+            addLog("  设备有 GMS FusedLocation，但需要额外 API")
+        } catch (_: ClassNotFoundException) {
+            addLog("  设备无 GMS FusedLocation")
+        }
+
+        // 尝试 HMS FusedLocation
+        try {
+            val hmsClass = Class.forName("com.huawei.hms.location.FusedLocationProviderClient")
+            addLog("  设备有 HMS FusedLocation")
+        } catch (_: ClassNotFoundException) {
+            addLog("  设备无 HMS FusedLocation")
         }
 
         // 首次扫描 provider 状态
