@@ -11,8 +11,8 @@ android {
         applicationId = "com.fakegps.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "2.0.0"
     }
 
     buildFeatures {
@@ -25,17 +25,13 @@ android {
 
     buildTypes {
         debug {
-            // 默认 debug 构建——AGP 会自定加 testOnly=true
-            // 在 HarmonyOS 4.0 上无法选为模拟位置应用
             isDebuggable = true
         }
         release {
-            // 核心修复：release 构建不会自动加 testOnly=true
-            // 设为 debuggable 以保留调试能力
             isDebuggable = true
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("debug") // 复用 Android 默认 debug 签名
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
@@ -58,4 +54,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
     implementation("androidx.navigation:navigation-compose:2.7.6")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.2")
+
+    // 不直接依赖 HMS SDK——通过反射调用 FusedLocationProviderClient
+    // 避免额外配置 agconnect-services.json 和 Maven 仓库
 }

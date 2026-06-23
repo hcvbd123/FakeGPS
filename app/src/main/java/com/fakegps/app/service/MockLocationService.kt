@@ -14,13 +14,16 @@ import kotlin.concurrent.withLock
 
 /**
  * 模拟定位前台服务
- * 支持单点定位 + 多坐标自动巡航 + 摇杆方向控制
  *
- * 模拟策略：
- * 1. 同时向 GPS + Network + Passive 三个 Provider 注入位置
- * 2. 高频率（200ms）+ 高精度（4m），让融合定位引擎倾向使用我们的数据
- * 3. 完整模拟 Location 属性（精度、速度、方向、时间戳、海拔）
- * 4. 使用锁保护 Provider 操作，防止并发闪退
+ * 模拟策略（双重保障）：
+ * 方案A：HMS Location Kit 反射调用（华为手机专用）
+ *   → FusedLocationProviderClient.setMockMode(true)
+ *   → 告诉 HMS 停止使用真实 GPS/WiFi，只接受 mock 位置
+ *   → 联网/断网都能生效
+ *
+ * 方案B：标准 Android mock Provider（兜底）
+ *   → GPS + Network + Passive 三个 Provider
+ *   → 非华为手机、无 HMS Core 时使用
  */
 class MockLocationService : Service() {
 
@@ -43,7 +46,6 @@ class MockLocationService : Service() {
 
         private const val SPEED_MPS = 15.0
         private const val METER_PER_DEGREE_LAT = 111111.0
-        // 注入间隔（毫秒）——高频持续注入让系统更倾向于使用我们的数据
         private const val INJECT_INTERVAL_MS = 200L
 
         private var currentLat = 0.0
@@ -79,7 +81,6 @@ class MockLocationService : Service() {
             joystickAngle = 0.0
         }
 
-        /** 需要 mock 的 Provider */
         private val PROVIDERS = arrayOf(
             LocationManager.GPS_PROVIDER,
             LocationManager.NETWORK_PROVIDER,
@@ -90,9 +91,14 @@ class MockLocationService : Service() {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var mockJob: Job? = null
     private lateinit var locationManager: LocationManager
-
-    /** 保护 testProvider 操作，防止并发调 add/remove 导致的闪退 */
     private val providerLock = ReentrantLock()
+
+    // HMS 反射相关
+    private var hmsFusedClient: Any? = null
+    private var hmsSetMockModeMethod: java.lang.reflect.Method? = null
+    private var hmsSetMockLocationMethod: java.lang.reflect.Method? = null
+    private var hmsTaskWaitMethod: java.lang.reflect.Method? = null
+    private var hmsHasHms = false
 
     // 巡航数据
     private var routeLats = doubleArrayOf()
@@ -103,47 +109,135 @@ class MockLocationService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        createNotificationChannel()
+        try { createNotificationChannel() } catch (_: Exception) { }
         locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+
+        // 初始化 HMS FusedLocationProviderClient（反射方式）
+        initHms()
+    }
+
+    /**
+     * 通过反射初始化 HMS Location Kit
+     * 不依赖 agconnect-services.json 或任何 Gradle 插件
+     */
+    private fun initHms() {
+        try {
+            val locationServicesClass = Class.forName("com.huawei.hms.location.LocationServices")
+            val getFusedMethod = locationServicesClass.getMethod(
+                "getFusedLocationProviderClient", Context::class.java
+            )
+            hmsFusedClient = getFusedMethod.invoke(null, this)
+
+            val clientClass = hmsFusedClient?.javaClass
+            hmsSetMockModeMethod = clientClass?.getMethod(
+                "setMockMode", Boolean::class.javaPrimitiveType
+            )
+            hmsSetMockLocationMethod = clientClass?.getMethod(
+                "setMockLocation", Location::class.java
+            )
+
+            // Task.getResult() 用于等待异步结果
+            hmsTaskWaitMethod = Class.forName("com.huawei.hmf.tasks.Task")
+                .getMethod("getResult")
+
+            hmsHasHms = hmsSetMockModeMethod != null && hmsSetMockLocationMethod != null
+        } catch (e: Exception) {
+            hmsHasHms = false
+        }
+    }
+
+    /**
+     * 调用 HMS FusedLocationProviderClient.setMockMode(true)
+     * 让华为定位服务停止使用真实 GPS/WiFi
+     */
+    private fun enableHmsMockMode() {
+        if (!hmsHasHms || hmsFusedClient == null || hmsSetMockModeMethod == null) return
+
+        try {
+            val task = hmsSetMockModeMethod.invoke(hmsFusedClient, true) ?: return
+            // 等待异步任务完成（最多 3 秒）
+            try {
+                hmsTaskWaitMethod?.invoke(task)
+            } catch (_: Exception) { }
+        } catch (e: Exception) { }
+    }
+
+    /**
+     * 调用 HMS FusedLocationProviderClient.setMockLocation()
+     */
+    private fun injectHmsMockLocation(lat: Double, lon: Double) {
+        if (!hmsHasHms || hmsFusedClient == null || hmsSetMockLocationMethod == null) return
+
+        try {
+            val location = Location(LocationManager.GPS_PROVIDER).apply {
+                this.latitude = lat
+                this.longitude = lon
+                this.accuracy = 4.0f
+                this.time = System.currentTimeMillis()
+                this.elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
+            }
+            val task = hmsSetMockLocationMethod.invoke(hmsFusedClient, location) ?: return
+            try {
+                hmsTaskWaitMethod?.invoke(task)
+            } catch (_: Exception) { }
+        } catch (e: Exception) { }
+    }
+
+    /**
+     * 关闭 HMS Mock 模式
+     */
+    private fun disableHmsMockMode() {
+        if (!hmsHasHms || hmsFusedClient == null || hmsSetMockModeMethod == null) return
+        try {
+            val task = hmsSetMockModeMethod.invoke(hmsFusedClient, false) ?: return
+            try {
+                hmsTaskWaitMethod?.invoke(task)
+            } catch (_: Exception) { }
+        } catch (e: Exception) { }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_START -> {
-                val lat = intent.getDoubleExtra(EXTRA_LAT, 0.0)
-                val lon = intent.getDoubleExtra(EXTRA_LON, 0.0)
-                val alt = intent.getDoubleExtra(EXTRA_ALT, 0.0)
-                isRouteMode = false
-                resetJoystick()
-                startMocking(lat, lon, alt)
-            }
-            ACTION_START_ROUTE -> {
-                routeLats = intent.getDoubleArrayExtra(EXTRA_LATS) ?: doubleArrayOf()
-                routeLons = intent.getDoubleArrayExtra(EXTRA_LONS) ?: doubleArrayOf()
-                routeNames = intent.getStringArrayExtra(EXTRA_NAMES) ?: arrayOf()
-                intervalMin = intent.getIntExtra(EXTRA_INTERVAL_MIN, 5)
-                intervalMax = intent.getIntExtra(EXTRA_INTERVAL_MAX, 25)
-                if (routeLats.isNotEmpty()) {
-                    isRouteMode = true
+        try {
+            when (intent?.action) {
+                ACTION_START -> {
+                    val lat = intent.getDoubleExtra(EXTRA_LAT, 0.0)
+                    val lon = intent.getDoubleExtra(EXTRA_LON, 0.0)
+                    val alt = intent.getDoubleExtra(EXTRA_ALT, 0.0)
+                    isRouteMode = false
                     resetJoystick()
-                    routeTotal = routeLats.size
-                    routeIndex = 0
-                    startRoute()
+                    startMocking(lat, lon, alt)
                 }
+                ACTION_START_ROUTE -> {
+                    routeLats = intent.getDoubleArrayExtra(EXTRA_LATS) ?: doubleArrayOf()
+                    routeLons = intent.getDoubleArrayExtra(EXTRA_LONS) ?: doubleArrayOf()
+                    routeNames = intent.getStringArrayExtra(EXTRA_NAMES) ?: arrayOf()
+                    intervalMin = intent.getIntExtra(EXTRA_INTERVAL_MIN, 5)
+                    intervalMax = intent.getIntExtra(EXTRA_INTERVAL_MAX, 25)
+                    if (routeLats.isNotEmpty()) {
+                        isRouteMode = true
+                        resetJoystick()
+                        routeTotal = routeLats.size
+                        routeIndex = 0
+                        startRoute()
+                    }
+                }
+                ACTION_STOP -> stopMocking()
             }
-            ACTION_STOP -> stopMocking()
-        }
+        } catch (e: Exception) { }
         return START_STICKY
     }
 
     private fun startRoute() {
         isRunning = true
         setupAllTestProvidersSafely()
+        enableHmsMockMode()
 
-        val notification = buildNotification()
-        startForeground(NOTIFICATION_ID, notification)
+        try {
+            val notification = buildNotification()
+            startForeground(NOTIFICATION_ID, notification)
+        } catch (_: Exception) { }
 
         mockJob?.cancel()
         mockJob = scope.launch {
@@ -161,7 +255,7 @@ class MockLocationService : Service() {
 
                 val dwellJob = launch {
                     while (isActive) {
-                        injectToAllProviders(lat, lon, 0.0)
+                        injectAll(lat, lon, 0.0)
                         delay(INJECT_INTERVAL_MS)
                     }
                 }
@@ -190,9 +284,12 @@ class MockLocationService : Service() {
         routeName = ""
 
         setupAllTestProvidersSafely()
+        enableHmsMockMode()
 
-        val notification = buildNotification()
-        startForeground(NOTIFICATION_ID, notification)
+        try {
+            val notification = buildNotification()
+            startForeground(NOTIFICATION_ID, notification)
+        } catch (_: Exception) { }
 
         mockJob?.cancel()
         mockJob = scope.launch {
@@ -209,20 +306,23 @@ class MockLocationService : Service() {
                     currentBearing = joystickAngle.toFloat()
                 }
 
-                injectToAllProviders(currentLat, currentLon, currentAlt)
+                injectAll(currentLat, currentLon, currentAlt)
                 delay(INJECT_INTERVAL_MS)
             }
         }
     }
 
     /**
-     * 核心方法：同时向三个 Provider 高速注入高精度位置
-     *
-     * 策略说明：
-     * - 精度设为 4 米（比真实 GPS 3-8 米还略好），让融合定位引擎优先选用
-     * - 频率 200ms（比默认定位周期快），保证位置始终"新鲜"
-     * - 三个 Provider 都注入同一坐标，消除数据源冲突
+     * 核心注入：同时使用 HMS mock + 标准 Provider mock
      */
+    private fun injectAll(lat: Double, lon: Double, alt: Double) {
+        // 方案A：HMS Location Kit — 华为手机专属，联网也生效
+        injectHmsMockLocation(lat, lon)
+
+        // 方案B：标准 Provider — 所有 Android 兜底
+        injectToAllProviders(lat, lon, alt)
+    }
+
     private fun injectToAllProviders(lat: Double, lon: Double, alt: Double) {
         val time = System.currentTimeMillis()
         val elapsedNs = SystemClock.elapsedRealtimeNanos()
@@ -234,7 +334,6 @@ class MockLocationService : Service() {
                         this.latitude = lat
                         this.longitude = lon
                         this.altitude = alt
-                        // 精度 4 米——比真实 GPS 还好，让融合定位引擎更倾向于使用我们的数据
                         this.accuracy = 4.0f
                         this.bearing = currentBearing
                         this.speed = if (joystickActive && !isRouteMode) SPEED_MPS.toFloat() else 0f
@@ -242,24 +341,16 @@ class MockLocationService : Service() {
                         this.elapsedRealtimeNanos = elapsedNs
                     }
                     locationManager.setTestProviderLocation(provider, location)
-                } catch (_: Exception) {
-                    // Provider 可能被移除，忽略静默
-                }
+                } catch (_: Exception) { }
             }
         }
     }
 
-    /**
-     * 使用锁保护的 Provider 设置
-     * 防止快速开始/停止导致并发 add/remove 闪退
-     */
     private fun setupAllTestProvidersSafely() {
         providerLock.withLock {
             for (provider in PROVIDERS) {
                 try {
-                    try {
-                        locationManager.removeTestProvider(provider)
-                    } catch (_: Exception) { /* 没有这个 provider，忽略 */ }
+                    try { locationManager.removeTestProvider(provider) } catch (_: Exception) { }
                     locationManager.addTestProvider(
                         provider,
                         false, false, false, false,
@@ -276,9 +367,7 @@ class MockLocationService : Service() {
     private fun removeAllTestProvidersSafely() {
         providerLock.withLock {
             for (provider in PROVIDERS) {
-                try {
-                    locationManager.removeTestProvider(provider)
-                } catch (_: Exception) { }
+                try { locationManager.removeTestProvider(provider) } catch (_: Exception) { }
             }
         }
     }
@@ -314,6 +403,10 @@ class MockLocationService : Service() {
         isRouteMode = false
         resetJoystick()
         mockJob?.cancel()
+
+        // 关闭 HMS mock 模式
+        disableHmsMockMode()
+
         removeAllTestProvidersSafely()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -323,6 +416,7 @@ class MockLocationService : Service() {
         scope.cancel()
         isRunning = false
         resetJoystick()
+        disableHmsMockMode()
         removeAllTestProvidersSafely()
         super.onDestroy()
     }
