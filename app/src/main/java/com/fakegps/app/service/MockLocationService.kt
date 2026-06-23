@@ -18,21 +18,21 @@ import kotlin.concurrent.withLock
 /**
  * 模拟定位前台服务
  *
- * 原理（参考主流 Fake Location App 实现）：
- * 1. addTestProvider — 创建 mock GPS provider（仅 GPS_PROVIDER）
- * 2. setTestProviderLocation — 以 100ms 频率注入伪造的 Location 对象
+ * 原理（参考主流的 Lerist Fake Location No-Root 模式）：
+ * 1. addTestProvider — 创建 mock GPS + NETWORK provider
+ * 2. setTestProviderLocation — 以 100ms 频率同时向两个 provider 注入伪造的 Location
  * 3. setIsFromMockProvider(false) via 反射 — 隐藏模拟位置标记
  *    普通 setTestProviderLocation 注入的 Location 的 isFromMockProvider() 返回 true，
  *    地图/打卡 App 检测到后可能忽略。通过反射把该标记改为 false，让 App 认为是真实位置。
- * 4. requestLocationUpdates + 空 listener — 强制系统分发 mock 位置给所有监听的 App
- * 5. time = now % 1_000_000_000L — 防止序列号无限增长导致 future 时间戳被系统忽略
+ * 4. requestLocationUpdates + 空 listener — 强制系统分发 mock 位置
+ * 5. time = System.currentTimeMillis() — 直接用当前时间，避免远古/未来时间戳
+ * 6. 坐标变化时 toggle provider 状态，强制广播位置更新
+ * 7. 每 30s 重新检查 provider 状态，防止系统回收
  *
- * ⚠️ 注意：仅注入 GPS_PROVIDER（不操作 NETWORK/PASSIVE），因为：
- *   - 多个 provider 同时 mock 增加了系统检测到异常的风险
- *   - GPS_PROVIDER 在注入时系统会广播给所有监听位置变化的 App
- *   - 不需要 toggle provider 状态（setTestProviderEnabled false/true）
- *     频繁 toggle 会清空 mock 数据缓存，导致地图跳到未知位置
- *   - 不需要 30s 重设定时器：removeTestProvider + addTestProvider 会破坏 listener 绑定
+ * ⚠️ 同时 mock GPS + NETWORK 两个 provider：
+ *   - GPS_PROVIDER: 地图类 App（高德、百度）主要监听这个
+ *   - NETWORK_PROVIDER: 微信、打卡 App 等很多用这个
+ *   只 mock 一个时，App 可能从另一个 provider 拿到真实/空位置
  */
 class MockLocationService : Service() {
 
@@ -53,8 +53,10 @@ class MockLocationService : Service() {
         const val EXTRA_INTERVAL_MIN = "interval_min"
         const val EXTRA_INTERVAL_MAX = "interval_max"
 
-        // 只 mock GPS_PROVIDER — 足够了，系统会广播给所有位置监听者
-        private val MOCK_PROVIDER = LocationManager.GPS_PROVIDER
+        // 同时 mock GPS + NETWORK，覆盖所有 App 的定位监听方式
+        private val GPS_PROVIDER = LocationManager.GPS_PROVIDER
+        private val NETWORK_PROVIDER = LocationManager.NETWORK_PROVIDER
+        private val MOCK_PROVIDERS = listOf(GPS_PROVIDER, NETWORK_PROVIDER)
 
         private const val SPEED_MPS = 15.0
         private const val METER_PER_DEGREE_LAT = 111111.0
@@ -65,17 +67,13 @@ class MockLocationService : Service() {
         /** 高精度 0.5m，让系统倾向采用我们的数据 */
         private const val MOCK_ACCURACY = 0.5f
 
+        /** 每 30s 检查一次 provider 状态（不销毁重建），防系统回收 */
+        private const val CHECK_INTERVAL_MS = 30_000L
+
         // ---- 反射隐藏 isFromMockProvider 标记 ----
 
-        /** 反射查找的 setIsFromMockProvider 方法缓存 */
         private var sSetIsFromMockProviderMethod: Method? = null
 
-        /**
-         * 通过反射将 location 的 isFromMockProvider 标记设为 false。
-         * 这样地图/打卡 App 收到的就是一个"真实位置"，不会检测为模拟。
-         *
-         * 此方法只反射查找一次，后续复用缓存，性能损失忽略不计。
-         */
         private fun hideMockFlag(location: Location) {
             try {
                 var method = sSetIsFromMockProviderMethod
@@ -86,11 +84,8 @@ class MockLocationService : Service() {
                     method.isAccessible = true
                     sSetIsFromMockProviderMethod = method
                 }
-                // method 在 if 块后已确保非空，但 Kotlin 无法跨 try 推导，加 !! 断言
                 method!!.invoke(location, false)
-            } catch (_: Exception) {
-                // 反射失败时静默忽略 — 位置仍然能注入，只是标记可能为 true
-            }
+            } catch (_: Exception) { }
         }
 
         // ---- 状态变量 ----
@@ -100,7 +95,6 @@ class MockLocationService : Service() {
         private var currentAlt = 0.0
         private var currentBearing = 0f
 
-        // 上次注入的坐标，用于判断坐标是否变化
         private var lastInjectedLat = Double.NaN
         private var lastInjectedLon = Double.NaN
 
@@ -135,11 +129,10 @@ class MockLocationService : Service() {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var mockJob: Job? = null
-    private var reSetupJob: Job? = null
+    private var checkJob: Job? = null
     private lateinit var locationManager: LocationManager
     private val providerLock = ReentrantLock()
 
-    // requestLocationUpdates 用
     private var isRegisteredLocationListener = false
     private var locationListener: LocationListener? = null
 
@@ -152,9 +145,7 @@ class MockLocationService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        try {
-            createNotificationChannel()
-        } catch (_: Exception) { }
+        try { createNotificationChannel() } catch (_: Exception) { }
         locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
     }
 
@@ -187,19 +178,16 @@ class MockLocationService : Service() {
                 }
                 ACTION_STOP -> stopMocking()
             }
-        } catch (e: Exception) {
-            // 防止闪退
-        }
+        } catch (e: Exception) { }
         return START_STICKY
     }
 
     private fun startRoute() {
         isRunning = true
-        setupProviderOnce()
+        setupProviders()
         registerLocationUpdates()
-        try {
-            startForeground(NOTIFICATION_ID, buildNotification())
-        } catch (_: Exception) { }
+        startProviderCheck()
+        try { startForeground(NOTIFICATION_ID, buildNotification()) } catch (_: Exception) { }
 
         mockJob?.cancel()
         mockJob = scope.launch {
@@ -212,12 +200,11 @@ class MockLocationService : Service() {
                 routeName = routeNames.getOrElse(i) { "点${i + 1}" }
                 currentLat = lat
                 currentLon = lon
-
                 updateNotification()
 
                 val dwellJob = launch {
                     while (isActive) {
-                        injectLocation(lat, lon, 0.0)
+                        injectAllProviders(lat, lon, 0.0)
                         delay(INJECT_INTERVAL_MS)
                     }
                 }
@@ -247,12 +234,11 @@ class MockLocationService : Service() {
         routeIndex = 0
         routeName = ""
 
-        setupProviderOnce()
+        setupProviders()
         registerLocationUpdates()
+        startProviderCheck()
 
-        try {
-            startForeground(NOTIFICATION_ID, buildNotification())
-        } catch (_: Exception) { }
+        try { startForeground(NOTIFICATION_ID, buildNotification()) } catch (_: Exception) { }
 
         mockJob?.cancel()
         mockJob = scope.launch {
@@ -269,72 +255,62 @@ class MockLocationService : Service() {
                     currentBearing = joystickAngle.toFloat()
                 }
 
-                injectLocation(currentLat, currentLon, currentAlt)
+                injectAllProviders(currentLat, currentLon, currentAlt)
                 delay(INJECT_INTERVAL_MS)
             }
         }
     }
 
     /**
-     * 注入一个 mock 位置。
+     * 向 GPS + NETWORK 两个 provider 同时注入 mock 位置。
      *
-     * 关键步骤：
-     * 1. 创建 Location 对象，填入目标坐标
-     * 2. 反射调用 setIsFromMockProvider(false) — 隐藏模拟标记
-     * 3. time = now % 1_000_000_000L — 保证时间戳不超出合理范围
-     *    避免 sequenceNo 无限增长导致系统认为"未来时间"而忽略
-     * 4. 坐标变化时 toggle provider（false→true）强制触发广播
-     *    坐标没变化时不做 toggle，避免清空 mock 数据
-     *
-     * 仅注入 GPS_PROVIDER。NETWORK/PASSIVE 不注入，因为 GPS_PROVIDER
-     * 的 setTestProviderLocation 足以让系统广播给所有位置监听者。
+     * 关键要点：
+     * - time 直接用 System.currentTimeMillis()，不要取模
+     *   （取模后变成 1970 年 1 月的远古时间，系统会忽略）
+     * - 坐标变化时 toggle provider 广播位置更新
+     * - 每个 Location 都调用 hideMockFlag() 隐藏模拟标记
      */
-    private fun injectLocation(lat: Double, lon: Double, alt: Double) {
+    private fun injectAllProviders(lat: Double, lon: Double, alt: Double) {
         val now = System.currentTimeMillis()
         val elapsedNs = SystemClock.elapsedRealtimeNanos()
 
         providerLock.withLock {
-            try {
-                val location = Location(MOCK_PROVIDER).apply {
-                    this.latitude = lat
-                    this.longitude = lon
-                    this.altitude = alt
-                    this.accuracy = MOCK_ACCURACY
-                    this.bearing = currentBearing
-                    this.speed = if (joystickActive && !isRouteMode) SPEED_MPS.toFloat() else 0f
-                    // 用当前时间取模，防止时间戳变成"未来时间"
-                    // 系统可能忽略 future 时间戳的位置更新
-                    this.time = now % 1_000_000_000L
-                    this.elapsedRealtimeNanos = elapsedNs
+            for (provider in MOCK_PROVIDERS) {
+                try {
+                    val location = Location(provider).apply {
+                        this.latitude = lat
+                        this.longitude = lon
+                        this.altitude = alt
+                        this.accuracy = MOCK_ACCURACY
+                        this.bearing = currentBearing
+                        this.speed = if (joystickActive && !isRouteMode) SPEED_MPS.toFloat() else 0f
+                        this.time = now
+                        this.elapsedRealtimeNanos = elapsedNs
+                    }
+
+                    hideMockFlag(location)
+                    locationManager.setTestProviderLocation(provider, location)
+
+                    // 坐标变化时 toggle，强制系统广播给所有注册了 listener 的 App
+                    if (lat != lastInjectedLat || lon != lastInjectedLon) {
+                        locationManager.setTestProviderEnabled(provider, false)
+                        locationManager.setTestProviderEnabled(provider, true)
+                    }
+                } catch (_: Exception) {
+                    // provider 丢失（系统回收了），尝试重建
+                    try { setupOneProvider(provider) } catch (_: Exception) { }
                 }
-
-                // ⭐ 核心：反射隐藏 isFromMockProvider 标记
-                // Fake_Location 用的就是同一技术 — 让地图/打卡 App 认为这是真实位置
-                hideMockFlag(location)
-
-                locationManager.setTestProviderLocation(MOCK_PROVIDER, location)
-
-                // 坐标真正变化时，toggle provider 来强制广播
-                // 坐标没变时保持不动，避免清空 mock 数据
-                if (lat != lastInjectedLat || lon != lastInjectedLon) {
-                    locationManager.setTestProviderEnabled(MOCK_PROVIDER, false)
-                    locationManager.setTestProviderEnabled(MOCK_PROVIDER, true)
-                    lastInjectedLat = lat
-                    lastInjectedLon = lon
-                }
-            } catch (_: Exception) {
-                // provider 丢失（系统清理了 mock provider），尝试重建
-                try { setupProviderOnce() } catch (_: Exception) { }
+            }
+            if (lat != lastInjectedLat || lon != lastInjectedLon) {
+                lastInjectedLat = lat
+                lastInjectedLon = lon
             }
         }
     }
 
     /**
-     * 注册 LocationListener — 通过 requestLocationUpdates(0L, 0f)
-     * 强制系统立即分发 mock 位置给所有监听该 Provider 的 App。
-     *
-     * 这是 Fake_Location 类 App 的标准做法：
-     * 不加这个 listener，地图 App 不会实时收到位置更新广播。
+     * 向 GPS + NETWORK 注册 LocationListener
+     * requestLocationUpdates(0, 0) 触发系统立即分发位置
      */
     private fun registerLocationUpdates() {
         if (isRegisteredLocationListener) return
@@ -345,13 +321,11 @@ class MockLocationService : Service() {
                 override fun onProviderDisabled(provider: String) { }
             }
             val listener = locationListener ?: return
-            locationManager.requestLocationUpdates(
-                MOCK_PROVIDER,
-                0L,
-                0f,
-                listener,
-                Looper.getMainLooper()
-            )
+            for (provider in MOCK_PROVIDERS) {
+                locationManager.requestLocationUpdates(
+                    provider, 0L, 0f, listener, Looper.getMainLooper()
+                )
+            }
             isRegisteredLocationListener = true
         } catch (e: Exception) {
             isRegisteredLocationListener = false
@@ -359,41 +333,66 @@ class MockLocationService : Service() {
     }
 
     /**
-     * 初始化 mock provider — 只调用一次。
-     * 后续不销毁重建，避免破坏 listener 绑定。
-     * 如果 injectLocation 的 try-catch 捕获到 provider 丢失，
-     * 会兜底重建。
+     * 初始化两个 mock provider（GPS + NETWORK）。
+     * 只调用一次，后续只通过 check 保活，不销毁重建。
      */
-    private fun setupProviderOnce() {
+    private fun setupProviders() {
         providerLock.withLock {
-            try {
-                // 先尝试移除旧 provider（可能不存在，忽略异常）
-                try {
-                    locationManager.removeTestProvider(MOCK_PROVIDER)
-                } catch (_: Exception) { }
-
-                locationManager.addTestProvider(
-                    MOCK_PROVIDER,
-                    false,   // requiresNetwork
-                    true,    // requiresSatellite — GPS 需要卫星
-                    false,   // requiresCell
-                    false,   // hasMonetaryCost
-                    true,    // supportsAltitude
-                    true,    // supportsSpeed
-                    true,    // supportsBearing
-                    android.location.Criteria.POWER_LOW,
-                    android.location.Criteria.ACCURACY_FINE
-                )
-                locationManager.setTestProviderEnabled(MOCK_PROVIDER, true)
-            } catch (_: Exception) { }
+            for (provider in MOCK_PROVIDERS) {
+                setupOneProvider(provider)
+            }
         }
     }
 
-    private fun removeTestProviderSafely() {
+    private fun setupOneProvider(provider: String) {
+        try {
+            try { locationManager.removeTestProvider(provider) } catch (_: Exception) { }
+            val requiresSatellite = (provider == LocationManager.GPS_PROVIDER)
+            val requiresNetwork = (provider != LocationManager.GPS_PROVIDER)
+            locationManager.addTestProvider(
+                provider,
+                requiresNetwork,   // requiresNetwork
+                requiresSatellite, // requiresSatellite
+                false,    // requiresCell
+                false,    // hasMonetaryCost
+                true,     // supportsAltitude
+                true,     // supportsSpeed
+                true,     // supportsBearing
+                android.location.Criteria.POWER_LOW,
+                android.location.Criteria.ACCURACY_FINE
+            )
+            locationManager.setTestProviderEnabled(provider, true)
+        } catch (_: Exception) { }
+    }
+
+    /**
+     * 每 30s 检查 provider 是否还在，如果被回收了则重建。
+     * 不销毁/重建已有 provider，避免破坏 listener 绑定。
+     */
+    private fun startProviderCheck() {
+        checkJob?.cancel()
+        checkJob = scope.launch {
+            while (isActive) {
+                delay(CHECK_INTERVAL_MS)
+                for (provider in MOCK_PROVIDERS) {
+                    try {
+                        // 通过 setTestProviderLocation 检查 provider 状态
+                        // 如果 provider 已被系统回收，会抛异常
+                        val testLoc = Location(provider)
+                        locationManager.setTestProviderLocation(provider, testLoc)
+                    } catch (_: Exception) {
+                        try { setupOneProvider(provider) } catch (_: Exception) { }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun removeAllTestProviders() {
         providerLock.withLock {
-            try {
-                locationManager.removeTestProvider(MOCK_PROVIDER)
-            } catch (_: Exception) { }
+            for (provider in MOCK_PROVIDERS) {
+                try { locationManager.removeTestProvider(provider) } catch (_: Exception) { }
+            }
         }
     }
 
@@ -428,13 +427,11 @@ class MockLocationService : Service() {
         isRouteMode = false
         resetJoystick()
         mockJob?.cancel()
+        checkJob?.cancel()
         isRegisteredLocationListener = false
-        // 先 removeUpdates 再 removeTestProvider
-        try {
-            locationListener?.let { locationManager.removeUpdates(it) }
-        } catch (_: Exception) { }
+        try { locationListener?.let { locationManager.removeUpdates(it) } } catch (_: Exception) { }
         locationListener = null
-        removeTestProviderSafely()
+        removeAllTestProviders()
         try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) { }
         stopSelf()
     }
@@ -444,11 +441,9 @@ class MockLocationService : Service() {
         isRunning = false
         resetJoystick()
         isRegisteredLocationListener = false
-        try {
-            locationListener?.let { locationManager.removeUpdates(it) }
-        } catch (_: Exception) { }
+        try { locationListener?.let { locationManager.removeUpdates(it) } } catch (_: Exception) { }
         locationListener = null
-        removeTestProviderSafely()
+        removeAllTestProviders()
         try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) { }
         super.onDestroy()
     }
@@ -456,9 +451,7 @@ class MockLocationService : Service() {
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
-                CHANNEL_ID,
-                "虚拟GPS服务",
-                NotificationManager.IMPORTANCE_LOW
+                CHANNEL_ID, "虚拟GPS服务", NotificationManager.IMPORTANCE_LOW
             )
             val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.createNotificationChannel(channel)
