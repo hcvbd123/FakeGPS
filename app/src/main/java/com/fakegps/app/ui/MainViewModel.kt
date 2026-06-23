@@ -12,18 +12,22 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import java.io.File
 
 data class UiState(
     val kmlName: String = "",
     val placemarks: List<KmlPlacemark> = emptyList(),
-    val checkedSet: Set<Int> = emptySet(),       // 勾选的序号
+    val checkedSet: Set<Int> = emptySet(),
     val activeIndex: Int = -1,
     val errorMessage: String = "",
     val floatingEnabled: Boolean = false,
-    val intervalMin: Int = 5,                    // 最短停留分钟
-    val intervalMax: Int = 25,                   // 最长停留分钟
-    val isRouteMode: Boolean = false,            // 是否巡航模式
-    val routeProgress: String = ""               // "2/5"
+    val intervalMin: Int = 5,
+    val intervalMax: Int = 25,
+    val isRouteMode: Boolean = false,
+    val routeProgress: String = "",
+    val isStarted: Boolean = false,             // 是否已点击"开始"
+    val kmlFiles: List<String> = emptyList(),   // km文件夹中的KML文件列表
+    val isScanning: Boolean = false
 )
 
 class MainViewModel : ViewModel() {
@@ -31,12 +35,57 @@ class MainViewModel : ViewModel() {
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState
 
-    fun loadKml(context: Context, uri: Uri) {
+    /** 扫描 KM 文件夹中的 KML 文件
+     * 优先扫描外部存储（USB可访问），其次扫描内部存储 */
+    private fun getKmDir(context: Context): File {
+        // 外部存储：Android/data/com.fakegps.app/files/km （USB 可访问）
+        val external = context.getExternalFilesDir("km")
+        if (external != null) {
+            external.mkdirs()
+            return external
+        }
+        // 回退到内部存储
+        val internal = File(context.filesDir, "km")
+        internal.mkdirs()
+        return internal
+    }
+
+    fun scanKmlFolder(context: Context) {
+        viewModelScope.launch(Dispatchers.IO) {
+            _uiState.value = _uiState.value.copy(isScanning = true)
+            try {
+                val kmDir = getKmDir(context)
+                if (!kmDir.exists()) {
+                    kmDir.mkdirs()
+                    _uiState.value = _uiState.value.copy(
+                        kmlFiles = emptyList(), isScanning = false)
+                    return@launch
+                }
+                val files = kmDir.listFiles()
+                    ?.filter { it.isFile && it.name.endsWith(".kml", true) }
+                    ?.map { it.name }
+                    ?.sorted()
+                    ?: emptyList()
+                _uiState.value = _uiState.value.copy(
+                    kmlFiles = files, isScanning = false)
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    kmlFiles = emptyList(), isScanning = false)
+            }
+        }
+    }
+
+    /** 从 km 文件夹加载指定 KML 文件 */
+    fun loadKmlFromFile(context: Context, filename: String) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val inputStream = context.contentResolver.openInputStream(uri)
-                    ?: throw Exception("无法打开文件")
-
+                val file = File(getKmDir(context), filename)
+                if (!file.exists()) {
+                    _uiState.value = _uiState.value.copy(
+                        errorMessage = "文件不存在: $filename")
+                    return@launch
+                }
+                val inputStream = file.inputStream()
                 val kmlData = KmlParser.parse(inputStream)
                 inputStream.close()
 
@@ -47,7 +96,34 @@ class MainViewModel : ViewModel() {
                     activeIndex = -1,
                     errorMessage = if (kmlData.placemarks.isEmpty()) "KML 未找到坐标点" else "",
                     isRouteMode = false,
-                    routeProgress = ""
+                    routeProgress = "",
+                    isStarted = false
+                )
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    errorMessage = "解析失败: ${e.message}")
+            }
+        }
+    }
+
+    /** 从文件选择器导入 KML */
+    fun loadKml(context: Context, uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val inputStream = context.contentResolver.openInputStream(uri)
+                    ?: throw Exception("无法打开文件")
+                val kmlData = KmlParser.parse(inputStream)
+                inputStream.close()
+
+                _uiState.value = _uiState.value.copy(
+                    kmlName = kmlData.name,
+                    placemarks = kmlData.placemarks,
+                    checkedSet = emptySet(),
+                    activeIndex = -1,
+                    errorMessage = if (kmlData.placemarks.isEmpty()) "KML 未找到坐标点" else "",
+                    isRouteMode = false,
+                    routeProgress = "",
+                    isStarted = false
                 )
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(
@@ -83,52 +159,69 @@ class MainViewModel : ViewModel() {
         )
     }
 
-    /** 启动巡航 */
-    fun startRoute(context: Context) {
+    /** 开始模拟 */
+    fun startSimulation(context: Context) {
         val state = _uiState.value
         val selected = state.checkedSet.sorted()
-        if (selected.isEmpty()) return
+        if (selected.isEmpty()) {
+            _uiState.value = state.copy(errorMessage = "请先勾选至少一个坐标")
+            return
+        }
 
         // 停止旧模拟
         context.stopService(Intent(context, MockLocationService::class.java))
 
-        val lats = selected.map { state.placemarks[it].latitude }.toDoubleArray()
-        val lons = selected.map { state.placemarks[it].longitude }.toDoubleArray()
-        val names = selected.map { state.placemarks[it].name }.toTypedArray()
+        if (selected.size >= 2) {
+            // 巡航模式
+            val lats = selected.map { state.placemarks[it].latitude }.toDoubleArray()
+            val lons = selected.map { state.placemarks[it].longitude }.toDoubleArray()
+            val names = selected.map { state.placemarks[it].name }.toTypedArray()
 
-        val intent = Intent(context, MockLocationService::class.java).apply {
-            action = MockLocationService.ACTION_START_ROUTE
-            putExtra(MockLocationService.EXTRA_LATS, lats)
-            putExtra(MockLocationService.EXTRA_LONS, lons)
-            putExtra(MockLocationService.EXTRA_NAMES, names)
-            putExtra(MockLocationService.EXTRA_INTERVAL_MIN, state.intervalMin)
-            putExtra(MockLocationService.EXTRA_INTERVAL_MAX, state.intervalMax)
+            val intent = Intent(context, MockLocationService::class.java).apply {
+                action = MockLocationService.ACTION_START_ROUTE
+                putExtra(MockLocationService.EXTRA_LATS, lats)
+                putExtra(MockLocationService.EXTRA_LONS, lons)
+                putExtra(MockLocationService.EXTRA_NAMES, names)
+                putExtra(MockLocationService.EXTRA_INTERVAL_MIN, state.intervalMin)
+                putExtra(MockLocationService.EXTRA_INTERVAL_MAX, state.intervalMax)
+            }
+            context.startForegroundService(intent)
+
+            _uiState.value = _uiState.value.copy(
+                activeIndex = selected.first(),
+                isRouteMode = true,
+                routeProgress = "1/${selected.size}",
+                isStarted = true
+            )
+        } else {
+            // 单点模拟（只勾选了1个）
+            val idx = selected.first()
+            val pm = state.placemarks[idx]
+            val intent = Intent(context, MockLocationService::class.java).apply {
+                action = MockLocationService.ACTION_START
+                putExtra(MockLocationService.EXTRA_LAT, pm.latitude)
+                putExtra(MockLocationService.EXTRA_LON, pm.longitude)
+                putExtra(MockLocationService.EXTRA_ALT, pm.altitude)
+            }
+            context.startForegroundService(intent)
+
+            _uiState.value = _uiState.value.copy(
+                activeIndex = idx,
+                isRouteMode = false,
+                routeProgress = "",
+                isStarted = true
+            )
         }
-        context.startForegroundService(intent)
-
-        _uiState.value = _uiState.value.copy(
-            activeIndex = selected.first(),
-            isRouteMode = true,
-            routeProgress = "1/${selected.size}"
-        )
     }
 
-    /** 模拟单点（点击某行） */
-    fun selectPlacemark(context: Context, index: Int, placemark: KmlPlacemark) {
+    /** 停止模拟 */
+    fun stopSimulation(context: Context) {
         context.stopService(Intent(context, MockLocationService::class.java))
-
-        val intent = Intent(context, MockLocationService::class.java).apply {
-            action = MockLocationService.ACTION_START
-            putExtra(MockLocationService.EXTRA_LAT, placemark.latitude)
-            putExtra(MockLocationService.EXTRA_LON, placemark.longitude)
-            putExtra(MockLocationService.EXTRA_ALT, placemark.altitude)
-        }
-        context.startForegroundService(intent)
-
         _uiState.value = _uiState.value.copy(
-            activeIndex = index,
+            isStarted = false,
             isRouteMode = false,
-            routeProgress = ""
+            routeProgress = "",
+            activeIndex = -1
         )
     }
 
@@ -136,5 +229,9 @@ class MainViewModel : ViewModel() {
         _uiState.value = _uiState.value.copy(
             floatingEnabled = !_uiState.value.floatingEnabled
         )
+    }
+
+    fun clearError() {
+        _uiState.value = _uiState.value.copy(errorMessage = "")
     }
 }
