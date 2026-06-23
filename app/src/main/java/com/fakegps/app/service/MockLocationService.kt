@@ -262,7 +262,9 @@ class MockLocationService : Service() {
                         this.elapsedRealtimeNanos = elapsedNs + sequenceNo
                     }
                     locationManager.setTestProviderLocation(provider, location)
-                } catch (_: Exception) { }
+                    // Force broadcast to all listening apps by toggling provider state
+                    locationManager.setTestProviderEnabled(provider, false)
+                    locationManager.setTestProviderEnabled(provider, true)
             }
         }
     }

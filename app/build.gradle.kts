@@ -23,6 +23,15 @@ android {
         kotlinCompilerExtensionVersion = "1.5.5"
     }
 
+    signingConfigs {
+        create("release") {
+            storeFile = file("release.keystore")
+            storePassword = "android123"
+            keyAlias = "fakegps"
+            keyPassword = "android123"
+        }
+    }
+
     buildTypes {
         debug {
             isDebuggable = true
@@ -31,7 +40,7 @@ android {
             isDebuggable = true
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 
