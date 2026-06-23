@@ -9,15 +9,18 @@ import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
 import kotlinx.coroutines.*
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /**
  * 模拟定位前台服务
  * 支持单点定位 + 多坐标自动巡航 + 摇杆方向控制
  *
- * 模拟策略（对标 Fake Location No-Root 模式）：
- * 同时向 GPS + Network + Passive 三个 Provider 每秒注入位置
- * Location 对象模拟完整属性（精度、速度、方向、时间）
- * 让各种 App（GPS定位、基站/WiFi定位、混合定位）都能收到
+ * 模拟策略：
+ * 1. 同时向 GPS + Network + Passive 三个 Provider 注入位置
+ * 2. 高频率（200ms）+ 高精度（4m），让融合定位引擎倾向使用我们的数据
+ * 3. 完整模拟 Location 属性（精度、速度、方向、时间戳、海拔）
+ * 4. 使用锁保护 Provider 操作，防止并发闪退
  */
 class MockLocationService : Service() {
 
@@ -40,6 +43,8 @@ class MockLocationService : Service() {
 
         private const val SPEED_MPS = 15.0
         private const val METER_PER_DEGREE_LAT = 111111.0
+        // 注入间隔（毫秒）——高频持续注入让系统更倾向于使用我们的数据
+        private const val INJECT_INTERVAL_MS = 200L
 
         private var currentLat = 0.0
         private var currentLon = 0.0
@@ -85,6 +90,9 @@ class MockLocationService : Service() {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var mockJob: Job? = null
     private lateinit var locationManager: LocationManager
+
+    /** 保护 testProvider 操作，防止并发调 add/remove 导致的闪退 */
+    private val providerLock = ReentrantLock()
 
     // 巡航数据
     private var routeLats = doubleArrayOf()
@@ -132,7 +140,7 @@ class MockLocationService : Service() {
 
     private fun startRoute() {
         isRunning = true
-        setupAllTestProviders()
+        setupAllTestProvidersSafely()
 
         val notification = buildNotification()
         startForeground(NOTIFICATION_ID, notification)
@@ -154,7 +162,7 @@ class MockLocationService : Service() {
                 val dwellJob = launch {
                     while (isActive) {
                         injectToAllProviders(lat, lon, 0.0)
-                        delay(1000)
+                        delay(INJECT_INTERVAL_MS)
                     }
                 }
 
@@ -181,7 +189,7 @@ class MockLocationService : Service() {
         routeIndex = 0
         routeName = ""
 
-        setupAllTestProviders()
+        setupAllTestProvidersSafely()
 
         val notification = buildNotification()
         startForeground(NOTIFICATION_ID, notification)
@@ -189,7 +197,6 @@ class MockLocationService : Service() {
         mockJob?.cancel()
         mockJob = scope.launch {
             while (isActive) {
-                // 摇杆方向移动
                 if (joystickActive && !isRouteMode) {
                     val rad = Math.toRadians(joystickAngle)
                     val dyMeters = SPEED_MPS * Math.cos(rad)
@@ -203,42 +210,56 @@ class MockLocationService : Service() {
                 }
 
                 injectToAllProviders(currentLat, currentLon, currentAlt)
-                delay(1000)
+                delay(INJECT_INTERVAL_MS)
             }
         }
     }
 
     /**
-     * 核心方法：同时向 GPS + Network + Passive 三个 Provider 注入位置
-     * 对标 Fake Location No-Root 模式的实现方式
+     * 核心方法：同时向三个 Provider 高速注入高精度位置
+     *
+     * 策略说明：
+     * - 精度设为 4 米（比真实 GPS 3-8 米还略好），让融合定位引擎优先选用
+     * - 频率 200ms（比默认定位周期快），保证位置始终"新鲜"
+     * - 三个 Provider 都注入同一坐标，消除数据源冲突
      */
     private fun injectToAllProviders(lat: Double, lon: Double, alt: Double) {
         val time = System.currentTimeMillis()
         val elapsedNs = SystemClock.elapsedRealtimeNanos()
 
-        for (provider in PROVIDERS) {
-            try {
-                val location = Location(provider).apply {
-                    this.latitude = lat
-                    this.longitude = lon
-                    this.altitude = alt
-                    // 模拟高精度定位（通常真实 GPS 精度 8-20 米）
-                    this.accuracy = 18.0f
-                    this.bearing = currentBearing
-                    this.speed = if (joystickActive && !isRouteMode) SPEED_MPS.toFloat() else 0f
-                    // 时间戳必须设置，某些 App 用时间判断位置是否"新鲜"
-                    this.time = time
-                    this.elapsedRealtimeNanos = elapsedNs
+        providerLock.withLock {
+            for (provider in PROVIDERS) {
+                try {
+                    val location = Location(provider).apply {
+                        this.latitude = lat
+                        this.longitude = lon
+                        this.altitude = alt
+                        // 精度 4 米——比真实 GPS 还好，让融合定位引擎更倾向于使用我们的数据
+                        this.accuracy = 4.0f
+                        this.bearing = currentBearing
+                        this.speed = if (joystickActive && !isRouteMode) SPEED_MPS.toFloat() else 0f
+                        this.time = time
+                        this.elapsedRealtimeNanos = elapsedNs
+                    }
+                    locationManager.setTestProviderLocation(provider, location)
+                } catch (_: Exception) {
+                    // Provider 可能被移除，忽略静默
                 }
-                locationManager.setTestProviderLocation(provider, location)
-            } catch (e: SecurityException) {
-                // 未授权
-            } catch (e: IllegalArgumentException) {
-                // Provider 未设置 → 重试
+            }
+        }
+    }
+
+    /**
+     * 使用锁保护的 Provider 设置
+     * 防止快速开始/停止导致并发 add/remove 闪退
+     */
+    private fun setupAllTestProvidersSafely() {
+        providerLock.withLock {
+            for (provider in PROVIDERS) {
                 try {
-                    locationManager.removeTestProvider(provider)
-                } catch (_: Exception) { }
-                try {
+                    try {
+                        locationManager.removeTestProvider(provider)
+                    } catch (_: Exception) { /* 没有这个 provider，忽略 */ }
                     locationManager.addTestProvider(
                         provider,
                         false, false, false, false,
@@ -248,29 +269,17 @@ class MockLocationService : Service() {
                     )
                     locationManager.setTestProviderEnabled(provider, true)
                 } catch (_: Exception) { }
-            } catch (_: Exception) { }
+            }
         }
     }
 
-    private fun setupAllTestProviders() {
-        for (provider in PROVIDERS) {
-            try {
-                try { locationManager.removeTestProvider(provider) } catch (_: Exception) { }
-                locationManager.addTestProvider(
-                    provider,
-                    false, false, false, false,
-                    true, true, true,
-                    android.location.Criteria.POWER_LOW,
-                    android.location.Criteria.ACCURACY_FINE
-                )
-                locationManager.setTestProviderEnabled(provider, true)
-            } catch (_: Exception) { }
-        }
-    }
-
-    private fun removeAllTestProviders() {
-        for (provider in PROVIDERS) {
-            try { locationManager.removeTestProvider(provider) } catch (_: Exception) { }
+    private fun removeAllTestProvidersSafely() {
+        providerLock.withLock {
+            for (provider in PROVIDERS) {
+                try {
+                    locationManager.removeTestProvider(provider)
+                } catch (_: Exception) { }
+            }
         }
     }
 
@@ -305,7 +314,7 @@ class MockLocationService : Service() {
         isRouteMode = false
         resetJoystick()
         mockJob?.cancel()
-        removeAllTestProviders()
+        removeAllTestProvidersSafely()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -314,7 +323,7 @@ class MockLocationService : Service() {
         scope.cancel()
         isRunning = false
         resetJoystick()
-        removeAllTestProviders()
+        removeAllTestProvidersSafely()
         super.onDestroy()
     }
 
