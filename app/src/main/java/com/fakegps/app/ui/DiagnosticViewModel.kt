@@ -1,0 +1,174 @@
+package com.fakegps.app.ui
+
+import android.content.Context
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
+import android.os.Bundle
+import android.os.Looper
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+
+data class ProviderState(
+    val name: String,
+    val enabled: Boolean,
+    val location: String = "无",
+    val time: String = ""
+)
+
+data class DiagUiState(
+    val log: List<String> = emptyList(),
+    val providers: List<ProviderState> = emptyList(),
+    val isMonitoring: Boolean = false,
+    val lastRealLocation: String = "无",
+    val testProviders: List<String> = emptyList()
+)
+
+class DiagnosticViewModel : ViewModel() {
+
+    private val _uiState = MutableStateFlow(DiagUiState())
+    val uiState: StateFlow<DiagUiState> = _uiState
+
+    private var monitorJob: Job? = null
+    private var locationManager: LocationManager? = null
+    private var currentListener: LocationListener? = null
+
+    /** 添加日志 */
+    private fun addLog(msg: String) {
+        val ts = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.getDefault())
+            .format(java.util.Date())
+        val current = _uiState.value.log
+        val newLog = current + "[$ts] $msg"
+        // 只保留最后 200 条
+        _uiState.value = _uiState.value.copy(
+            log = if (newLog.size > 200) newLog.drop(newLog.size - 200) else newLog
+        )
+    }
+
+    fun startMonitoring(context: Context) {
+        if (_uiState.value.isMonitoring) return
+
+        locationManager = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        val lm = locationManager ?: return
+
+        _uiState.value = _uiState.value.copy(isMonitoring = true, log = emptyList())
+        addLog("═══ 诊断开始 ═══")
+
+        // 列出所有 provider
+        val allProviders = lm.getAllProviders() ?: emptyList()
+        addLog("系统所有 Provider: ${allProviders.joinToString(", ")}")
+
+        // 列出测试 provider
+        // 注意：getTestProvider 相关 API 在非 debuggable 下不可用
+        // 我们可以通过检查 provider 是否存在来判断测试 provider
+        addLog("正在监听所有位置来源...")
+
+        // 注册监听器
+        currentListener = object : LocationListener {
+            override fun onLocationChanged(location: Location) {
+                val isMock = try { location.isFromMockProvider } catch (_: Exception) { false }
+                val mockTag = if (isMock) " ⚠️FROM_MOCK" else ""
+                addLog("📍 ${location.provider}: (${"%.6f".format(location.latitude)}, ${"%.6f".format(location.longitude)}) 精度=${location.accuracy}m${mockTag}")
+
+                // 更新实时状态
+                updateProviderStates(lm)
+            }
+
+            override fun onProviderEnabled(provider: String) {
+                addLog("🟢 Provider 启用: $provider")
+                updateProviderStates(lm)
+            }
+
+            override fun onProviderDisabled(provider: String) {
+                addLog("🔴 Provider 禁用: $provider")
+                updateProviderStates(lm)
+            }
+
+            override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {
+                val statusMap = mapOf(
+                    LocationManager.OUT_OF_SERVICE to "OUT_OF_SERVICE",
+                    LocationManager.TEMPORARILY_UNAVAILABLE to "TEMPORARILY_UNAVAILABLE",
+                    LocationManager.AVAILABLE to "AVAILABLE"
+                )
+                addLog("📡 $provider 状态: ${statusMap[status] ?: status.toString()}")
+                updateProviderStates(lm)
+            }
+        }
+
+        try {
+            lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 0L, 0f, currentListener!!, Looper.getMainLooper())
+            lm.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 0L, 0f, currentListener!!, Looper.getMainLooper())
+            lm.requestLocationUpdates(LocationManager.PASSIVE_PROVIDER, 0L, 0f, currentListener!!, Looper.getMainLooper())
+
+            // 尝试获取 Fused location provider
+            try {
+                lm.requestLocationUpdates("fused", 0L, 0f, currentListener!!, Looper.getMainLooper())
+                addLog("  也监听了 fused provider")
+            } catch (_: Exception) { }
+        } catch (e: Exception) {
+            addLog("❌ 注册监听失败: ${e.message}")
+        }
+
+        // 首次扫描 provider 状态
+        updateProviderStates(lm)
+
+        // 每秒刷新 provider 状态
+        monitorJob?.cancel()
+        monitorJob = viewModelScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                delay(2000)
+                try {
+                    lm?.let { updateProviderStates(it) }
+                } catch (_: Exception) { }
+            }
+        }
+    }
+
+    private fun updateProviderStates(lm: LocationManager) {
+        try {
+            val providers = listOf(
+                LocationManager.GPS_PROVIDER,
+                LocationManager.NETWORK_PROVIDER,
+                LocationManager.PASSIVE_PROVIDER,
+                "fused"
+            )
+
+            val states = providers.map { name ->
+                val enabled = try { lm.isProviderEnabled(name) } catch (_: Exception) { false }
+                val loc = try { lm.getLastKnownLocation(name) } catch (_: Exception) { null }
+                val locStr = if (loc != null) {
+                    "%.6f,%.6f 精度=${loc.accuracy}m 时间=%tT".format(loc.latitude, loc.longitude, loc.time)
+                } else {
+                    "无"
+                }
+                val timeStr = if (loc != null) "%tT".format(loc.time) else ""
+                ProviderState(name, enabled, locStr, timeStr)
+            }
+
+            _uiState.value = _uiState.value.copy(providers = states)
+        } catch (_: Exception) { }
+    }
+
+    fun stopMonitoring() {
+        monitorJob?.cancel()
+        try {
+            currentListener?.let { locationManager?.removeUpdates(it) }
+        } catch (_: Exception) { }
+        currentListener = null
+        locationManager = null
+        _uiState.value = _uiState.value.copy(isMonitoring = false)
+        addLog("═══ 诊断结束 ═══")
+    }
+
+    override fun onCleared() {
+        stopMonitoring()
+        super.onCleared()
+    }
+}

@@ -10,6 +10,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 
@@ -30,7 +31,14 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    MainScreen()
+                    // 页面导航：主界面 / 诊断界面
+                    var showDiagnostic by remember { mutableStateOf(false) }
+
+                    if (showDiagnostic) {
+                        DiagnosticScreen(onClose = { showDiagnostic = false })
+                    } else {
+                        MainScreen(onOpenDiagnostic = { showDiagnostic = true })
+                    }
                 }
             }
         }
@@ -39,7 +47,6 @@ class MainActivity : ComponentActivity() {
     private fun requestRequiredPermissions() {
         val permissionsToRequest = mutableListOf<String>()
 
-        // Android 13+ 需要 POST_NOTIFICATIONS — 前台服务通知必须请求
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(
                     this, Manifest.permission.POST_NOTIFICATIONS
@@ -49,7 +56,6 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // Android 10+ 后台定位权限
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             if (ContextCompat.checkSelfPermission(
                     this, Manifest.permission.ACCESS_BACKGROUND_LOCATION

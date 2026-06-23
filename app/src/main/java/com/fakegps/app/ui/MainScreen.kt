@@ -31,7 +31,10 @@ import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MainScreen(viewModel: MainViewModel = viewModel()) {
+fun MainScreen(
+    onOpenDiagnostic: () -> Unit = {},
+    viewModel: MainViewModel = viewModel()
+) {
     val context = LocalContext.current
     val state by viewModel.uiState.collectAsState()
 
@@ -100,6 +103,10 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                         Icon(Icons.Default.BubbleChart, contentDescription = "悬浮窗",
                             tint = if (state.floatingEnabled) MaterialTheme.colorScheme.primary
                                    else MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    IconButton(onClick = onOpenDiagnostic) {
+                        Icon(Icons.Default.BugReport, contentDescription = "诊断模式",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     IconButton(onClick = {
                         context.startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
