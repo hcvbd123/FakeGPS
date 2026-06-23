@@ -265,6 +265,7 @@ class MockLocationService : Service() {
                     // Force broadcast to all listening apps by toggling provider state
                     locationManager.setTestProviderEnabled(provider, false)
                     locationManager.setTestProviderEnabled(provider, true)
+                } catch (_: Exception) { }
             }
         }
     }
