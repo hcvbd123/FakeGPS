@@ -15,12 +15,7 @@ import kotlinx.coroutines.*
 
 /**
  * 悬浮窗服务
- * 显示当前模拟位置 + 全方向摇杆（仅单点模拟时可用）
- *
- * 摇杆逻辑：
- * - 单点模拟时：显示摇杆，拖拽控制移动方向（15米/秒）
- * - 巡航模式时：隐藏摇杆
- * - 未模拟时：隐藏摇杆
+ * 显示当前模拟位置 + 摇杆（拖拽移动模拟点）
  */
 class FloatingWindowService : Service() {
 
@@ -34,13 +29,11 @@ class FloatingWindowService : Service() {
     private var overlayView: View? = null
     private var isExpanded = false
 
-    // 控件引用
     private var labelView: TextView? = null
     private var coordsView: TextView? = null
     private var joystickView: JoystickView? = null
     private var joystickContainer: View? = null
 
-    // 刷新协程
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var updateJob: Job? = null
 
@@ -64,8 +57,6 @@ class FloatingWindowService : Service() {
             .build()
 
         startForeground(1002, notification)
-
-        // 启动定时刷新（每秒更新坐标显示+摇杆可见性）
         startUpdating()
 
         return START_STICKY
@@ -82,11 +73,6 @@ class FloatingWindowService : Service() {
         joystickView = overlayView?.findViewById(R.id.joystick_view)
         joystickContainer = overlayView?.findViewById(R.id.joystick_container)
 
-        // 设置摇杆回调 → 转发方向到 MockLocationService
-        joystickView?.onJoystickMove = { angle, active ->
-            MockLocationService.setJoystickDirection(angle, active)
-        }
-
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -102,7 +88,6 @@ class FloatingWindowService : Service() {
             y = 200
         }
 
-        // 拖拽移动整个悬浮窗
         overlayView?.setOnTouchListener(object : View.OnTouchListener {
             private var initialX = 0
             private var initialY = 0
@@ -133,7 +118,6 @@ class FloatingWindowService : Service() {
                             val dragDist = dx * dx + dy * dy
                             val elapsed = System.currentTimeMillis() - touchStartTime
 
-                            // 短点击（<300ms 且移动 < 20px）→ 折叠/展开摇杆
                             if (dragDist < 400 && elapsed < 300) {
                                 toggleJoystick()
                             }
@@ -154,12 +138,7 @@ class FloatingWindowService : Service() {
 
     private fun toggleJoystick() {
         val container = joystickContainer ?: return
-        val isSimulating = MockLocationService.isRunning && !MockLocationService.isRouteMode
-
-        if (!isSimulating) {
-            // 未模拟时不应展开摇杆
-            return
-        }
+        if (!MockLocationService.isMocking()) return
 
         isExpanded = !isExpanded
         container.visibility = if (isExpanded) View.VISIBLE else View.GONE
@@ -179,48 +158,28 @@ class FloatingWindowService : Service() {
     }
 
     private fun updateDisplay() {
-        val container = joystickContainer ?: return
         val lbl = labelView ?: return
         val crd = coordsView ?: return
-        val js = joystickView ?: return
 
-        val isSimulating = MockLocationService.isRunning
-        val isRoute = MockLocationService.isRouteMode
-        val isJoystickMode = isSimulating && !isRoute
-
-        // 更新标题
-        if (isRoute) {
-            lbl.text = "🚗 巡航 ${MockLocationService.routeIndex + 1}/${MockLocationService.routeTotal}"
-        } else if (isSimulating) {
+        if (MockLocationService.isMocking()) {
             lbl.text = "📍 模拟中"
-        } else {
-            lbl.text = "📍 GPS"
-        }
 
-        // 更新坐标
-        val (lat, lon) = MockLocationService.getCurrentLocation()
-        if (isSimulating) {
+            val (lat, lon) = MockLocationService.getCurrentLocation()
             crd.text = "%.5f, %.5f".format(lat, lon)
             crd.visibility = View.VISIBLE
 
-            // 摇杆：仅单点模拟时可见
-            if (isJoystickMode) {
-                if (!isExpanded) {
-                    // 自动展开摇杆
-                    isExpanded = true
-                    container.visibility = View.VISIBLE
-                }
-            } else {
-                // 巡航模式：隐藏并重置摇杆
-                isExpanded = false
-                container.visibility = View.GONE
-                js.reset()
+            // 自动展开摇杆
+            val container = joystickContainer ?: return
+            if (!isExpanded) {
+                isExpanded = true
+                container.visibility = View.VISIBLE
             }
         } else {
+            lbl.text = "📍 GPS"
             crd.visibility = View.GONE
             isExpanded = false
-            container.visibility = View.GONE
-            js.reset()
+            joystickContainer?.visibility = View.GONE
+            joystickView?.reset()
         }
     }
 

@@ -158,49 +158,22 @@ class MainViewModel : ViewModel() {
         // 停止旧模拟
         context.stopService(Intent(context, MockLocationService::class.java))
 
-        if (selected.size >= 2) {
-            // 巡航模式
-            val lats = selected.map { state.placemarks[it].latitude }.toDoubleArray()
-            val lons = selected.map { state.placemarks[it].longitude }.toDoubleArray()
-            val names = selected.map { state.placemarks[it].name }.toTypedArray()
-
-            val intent = Intent(context, MockLocationService::class.java).apply {
-                action = MockLocationService.ACTION_START_ROUTE
-                putExtra(MockLocationService.EXTRA_LATS, lats)
-                putExtra(MockLocationService.EXTRA_LONS, lons)
-                putExtra(MockLocationService.EXTRA_NAMES, names)
-                putExtra(MockLocationService.EXTRA_INTERVAL_MIN, state.intervalMin)
-                putExtra(MockLocationService.EXTRA_INTERVAL_MAX, state.intervalMax)
-            }
-            context.startForegroundService(intent)
-
-            _uiState.value = _uiState.value.copy(
-                activeIndex = firstIdx,
-                isRouteMode = true,
-                routeProgress = "1/${selected.size}",
-                isStarted = true,
-                currentLat = firstPm.latitude,
-                currentLon = firstPm.longitude
-            )
-        } else {
-            // 单点模拟（只勾选了1个）
-            val intent = Intent(context, MockLocationService::class.java).apply {
-                action = MockLocationService.ACTION_START
-                putExtra(MockLocationService.EXTRA_LAT, firstPm.latitude)
-                putExtra(MockLocationService.EXTRA_LON, firstPm.longitude)
-                putExtra(MockLocationService.EXTRA_ALT, firstPm.altitude)
-            }
-            context.startForegroundService(intent)
-
-            _uiState.value = _uiState.value.copy(
-                activeIndex = firstIdx,
-                isRouteMode = false,
-                routeProgress = "",
-                isStarted = true,
-                currentLat = firstPm.latitude,
-                currentLon = firstPm.longitude
-            )
+        // 所有模式现在都使用 ACTION_START（我们移除了巡航功能）
+        val intent = Intent(context, MockLocationService::class.java).apply {
+            action = MockLocationService.ACTION_START
+            putExtra(MockLocationService.EXTRA_LAT, firstPm.latitude)
+            putExtra(MockLocationService.EXTRA_LON, firstPm.longitude)
         }
+        context.startForegroundService(intent)
+
+        _uiState.value = _uiState.value.copy(
+            activeIndex = firstIdx,
+            isRouteMode = false,
+            routeProgress = "",
+            isStarted = true,
+            currentLat = firstPm.latitude,
+            currentLon = firstPm.longitude
+        )
     }
 
     fun stopSimulation(context: Context) {
