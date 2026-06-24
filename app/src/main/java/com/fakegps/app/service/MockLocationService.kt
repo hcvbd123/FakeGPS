@@ -50,7 +50,9 @@ class MockLocationService : Service() {
         } else {
             "fused"
         }
-        private val MOCK_PROVIDERS = listOf(PASSIVE_PROVIDER, GPS_PROVIDER, NETWORK_PROVIDER, FUSED_PROVIDER)
+        // 方案一：仿Fake Location，只mock GPS+NETWORK
+        // PASSIVE 和 FUSED 不做 test provider（但在拦截器中仍监听）
+        private val MOCK_PROVIDERS = listOf(GPS_PROVIDER, NETWORK_PROVIDER)
         private val INTERCEPTOR_PROVIDERS = listOf(PASSIVE_PROVIDER, GPS_PROVIDER, NETWORK_PROVIDER, FUSED_PROVIDER)
 
         private const val INJECT_BG_MS = 100L
