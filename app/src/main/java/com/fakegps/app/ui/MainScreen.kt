@@ -21,6 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -59,9 +60,10 @@ fun MainScreen(
 
     var showIntervalDialog by remember { mutableStateOf(false) }
 
-    // 首次加载时扫描 KML 文件夹
+    // 首次加载时扫描 KML 文件夹 + 检查 ROOT
     LaunchedEffect(Unit) {
         viewModel.scanKmlFolder(context)
+        viewModel.checkRoot()
     }
 
     Scaffold(
@@ -289,6 +291,58 @@ fun MainScreen(
                             Text("%.6f, %.6f".format(state.currentLat, state.currentLon),
                                 fontSize = if (isTablet) 14.sp else 13.sp)
                         }
+                    }
+                }
+            }
+
+            // ==================== LSPosed / ROOT 模式配置面板 ====================
+            Card(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (state.hasRoot) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f)
+                                    else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                )
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            if (state.hasRoot) Icons.Default.Verified else Icons.Default.Security,
+                            contentDescription = null,
+                            tint = if (state.hasRoot) MaterialTheme.colorScheme.tertiary
+                                   else MaterialTheme.colorScheme.outline,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("LSPosed / ROOT", fontWeight = FontWeight.Bold,
+                            fontSize = if (isCompact) 13.sp else 14.sp)
+                        Spacer(Modifier.weight(1f))
+                        TextButton(
+                            onClick = { viewModel.checkRoot() },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                        ) {
+                            Text("检测", fontSize = 12.sp)
+                        }
+                    }
+
+                    Text(state.rootMessage,
+                        fontSize = 12.sp,
+                        color = if (state.hasRoot) MaterialTheme.colorScheme.onTertiaryContainer
+                               else MaterialTheme.colorScheme.onSurfaceVariant)
+
+                    if (state.hasRoot) {
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = state.targetPkgName,
+                            onValueChange = { viewModel.setTargetPackage(it) },
+                            label = { Text("目标 APP 包名", fontSize = 12.sp) },
+                            placeholder = { Text("com.example.checkin", fontSize = 12.sp) },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            textStyle = TextStyle(fontSize = 13.sp)
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text("写入后需重启目标APP使Hook生效", fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.outline)
                     }
                 }
             }

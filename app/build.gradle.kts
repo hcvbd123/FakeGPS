@@ -57,6 +57,9 @@ android {
 }
 
 dependencies {
+    // Xposed API（compileOnly，不打进APK，LSPosed运行时提供）
+    compileOnly(fileTree(mapOf("dir" to "libs", "include" to listOf("api-82.jar"))))
+
     implementation(platform("androidx.compose:compose-bom:2024.01.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
