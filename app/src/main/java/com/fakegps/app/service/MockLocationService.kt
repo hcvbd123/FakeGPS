@@ -7,24 +7,26 @@ import android.location.Location
 import android.location.LocationManager
 import android.os.Build
 import android.os.IBinder
+import android.os.Looper
 import android.os.SystemClock
 import kotlinx.coroutines.*
 import java.lang.reflect.Method
+import java.text.SimpleDateFormat
+import java.util.*
+import java.util.concurrent.ConcurrentLinkedDeque
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * 模拟定位前台服务 — v19: 平滑过渡 + 广播唤醒 + 保活降频
+ * 模拟定位前台服务 — v20: 行为日志 + fused回满 + requestSingleUpdate
  *
- * v18 → v19 核心变更：
- * 1. ⏱ 注入间隔 150~300ms → 800~1500ms（前台Service保活，降频省电）
- * 2. 📡 注入后发送系统广播（PROVIDERS_CHANGED + GPS_FIX_CHANGE），强制唤醒地图SDK的LocationListener
- * 3. 🚶 坐标变更时微小平滑过渡（±0.0001度步进，每步200ms），地图SDK识别为连续移动自动刷新
- * 4. 💾 应用缓存 lastKnownLocation — 定时注入充当缓存刷新，地图APP打开时读到最新坐标
- * 5. 🎯 核心 Provider：GPS + NETWORK（两套），PASSIVE + FUSED 保持 setup 但不主动推送
- * 6. 精度随机 1.2~12.0m
- * 7. 反射隐藏 mock 标记
- * 8. 防重入锁 + 互斥锁双重保护
+ * v19 → v20：
+ * 1. FUSED 加回 PUSH_PROVIDERS（之前只推 GPS+NETWORK 导致 fused 空白）
+ * 2. 新增 BehaviorLog — 全局行为日志，记录每个 provider 操作的时间戳和结果
+ * 3. 注入后调用 requestSingleUpdate 直接唤醒系统 dispatch 链
+ * 4. 静态方法 getBehaviorLog() / clearBehaviorLog() 供诊断界面读取
+ * 5. PUSH_PROVIDERS = [GPS, NETWORK, FUSED]（三个都推，PASSIVE 仅 setup）
+ * 6. 保持 800~1500ms 保活降频、平滑过渡、广播唤醒
  */
 class MockLocationService : Service() {
 
@@ -40,39 +42,67 @@ class MockLocationService : Service() {
 
         private val GPS_PROVIDER = LocationManager.GPS_PROVIDER
         private val NETWORK_PROVIDER = LocationManager.NETWORK_PROVIDER
+        private val FUSED_PROVIDER = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            LocationManager.FUSED_PROVIDER
+        } else {
+            "fused"
+        }
+        private val PASSIVE_PROVIDER = LocationManager.PASSIVE_PROVIDER
 
-        // 注入目标：仅 GPS + NETWORK（两套测试Provider，多数地图SDK只监听这两个）
-        private val PUSH_PROVIDERS = listOf(GPS_PROVIDER, NETWORK_PROVIDER)
-        // 全量 Provider：用于 setup / cleanup
+        /** 主动推送的目标（三个：GPS + NETWORK + FUSED 全推） */
+        private val PUSH_PROVIDERS = listOf(GPS_PROVIDER, NETWORK_PROVIDER, FUSED_PROVIDER)
+        /** 全量 Provider：用于 setup / cleanup */
         private val ALL_PROVIDERS = listOf(
-            GPS_PROVIDER, NETWORK_PROVIDER,
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) LocationManager.FUSED_PROVIDER else "fused",
-            LocationManager.PASSIVE_PROVIDER
+            GPS_PROVIDER, NETWORK_PROVIDER, FUSED_PROVIDER, PASSIVE_PROVIDER
         )
 
-        // Toggle 序列顺序
+        /** Toggle 序列 */
         private val TOGGLE_SEQUENCE = listOf(
-            NETWORK_PROVIDER, GPS_PROVIDER, NETWORK_PROVIDER,
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) LocationManager.FUSED_PROVIDER else "fused"
+            NETWORK_PROVIDER, GPS_PROVIDER, NETWORK_PROVIDER, FUSED_PROVIDER
         )
 
-        // 注入间隔 800~1500ms 随机 — 前台Service保活，降频省电
+        // 注入间隔 800~1500ms — 前台 Service 保活
         private const val INJECT_MIN_MS = 800L
         private const val INJECT_MAX_MS = 1500L
 
-        // 平滑过渡步数（坐标变更时分步推送，地图SDK识别为连续移动）
+        // 平滑过渡参数
         private const val SMOOTH_STEPS = 10
-        // 每步间隔
         private const val STEP_DELAY_MS = 200L
-        // 步进幅度：±0.0001 度（约11米）
         private const val STEP_RANGE = 0.0001
 
-        // 精度随机 1.2~12.0m，小数点后一位
+        // ===== 行为日志（全局静态，诊断界面可读） =====
+        private val behaviorLog = ConcurrentLinkedDeque<String>()
+        private const val MAX_LOG_LINES = 500
+
+        /** 添加行为日志（供 Service 内部调用） */
+        @JvmStatic
+        fun addBehaviorLog(msg: String) {
+            val ts = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date())
+            behaviorLog.addLast("[$ts] $msg")
+            if (behaviorLog.size > MAX_LOG_LINES) {
+                behaviorLog.pollFirst()
+            }
+        }
+
+        /** 获取行为日志快照（供诊断界面读取） */
+        @JvmStatic
+        fun getBehaviorLog(): List<String> {
+            return ArrayList(behaviorLog)
+        }
+
+        /** 清空行为日志 */
+        @JvmStatic
+        fun clearBehaviorLog() {
+            behaviorLog.clear()
+        }
+        // ===========================================
+
+        // 精度随机
         private fun randomAccuracy(): Float {
             return (12 + (Math.random() * 108).toInt()) / 10f
         }
 
-        // 反射隐藏 mock 标记（懒加载线程安全）
+        // 反射隐藏 mock 标记
         private val hideMockFlagMethod = AtomicReference<Method?>(null)
         private fun hideMockFlag(location: Location) {
             try {
@@ -100,13 +130,9 @@ class MockLocationService : Service() {
         }
     }
 
-    // 注入互斥锁
     private val injectLock = Any()
-    // 防重入标记
     private val injectInProgress = AtomicBoolean(false)
-    // 启动标记
     private val started = AtomicBoolean(false)
-    // 独立 scope
     private var mockScope: CoroutineScope? = null
     private var injectJob: Job? = null
 
@@ -114,10 +140,13 @@ class MockLocationService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        addBehaviorLog("📱 Service onCreate")
         try { createNotificationChannel() } catch (_: Exception) { }
         try {
             locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            addBehaviorLog("✅ 获取 LocationManager 成功")
         } catch (e: Exception) {
+            addBehaviorLog("❌ 获取 LocationManager 失败: ${e.message}")
             stopSelf()
         }
     }
@@ -131,11 +160,16 @@ class MockLocationService : Service() {
                 ACTION_START -> {
                     val lat = intent.getDoubleExtra(EXTRA_LAT, 0.0)
                     val lon = intent.getDoubleExtra(EXTRA_LON, 0.0)
+                    addBehaviorLog("▶️ 收到 START 指令: %.6f, %.6f".format(lat, lon))
                     startMocking(lat, lon)
                 }
-                ACTION_STOP -> stopMocking()
+                ACTION_STOP -> {
+                    addBehaviorLog("⏹ 收到 STOP 指令")
+                    stopMocking()
+                }
             }
         } catch (e: Exception) {
+            addBehaviorLog("❌ onStartCommand 异常: ${e.message}")
             try { stopAll() } catch (_: Exception) { }
         }
         return START_NOT_STICKY
@@ -143,22 +177,28 @@ class MockLocationService : Service() {
 
     private fun startMocking(lat: Double, lon: Double) {
         if (started.getAndSet(true)) {
+            addBehaviorLog("⏹ 正在运行，先停止旧服务")
             stopAll()
         }
 
         currentLocationRef.set(doubleArrayOf(lat, lon))
         isRunning = true
+        addBehaviorLog("🚀 启动模拟定位: %.6f, %.6f".format(lat, lon))
 
         mockScope?.cancel()
         mockScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
         val scope = mockScope ?: return
 
         injectJob = scope.launch {
-            // 1. 设置 test provider（全量 4 个）
+            // 1. Setup
             try {
+                addBehaviorLog("🔧 Setup 全量 Provider...")
                 setupAllProviders()
                 startForeground(NOTIFICATION_ID, buildNotification())
-            } catch (_: Exception) { }
+                addBehaviorLog("✅ 前台服务 + Provider 设置完成")
+            } catch (e: Exception) {
+                addBehaviorLog("❌ Setup 异常: ${e.message}")
+            }
 
             if (!started.get()) return@launch
 
@@ -170,37 +210,51 @@ class MockLocationService : Service() {
             if (!started.get()) return@launch
             pushMockLoc()
 
-            // 3. Toggle 序列（唤醒地图SDK的provider监听）
+            // 3. Toggle 序列
+            addBehaviorLog("🔄 Toggle 序列开始: ${TOGGLE_SEQUENCE.joinToString("→")}")
             for (p in TOGGLE_SEQUENCE) {
                 if (!started.get()) return@launch
-                try { locationManager.setTestProviderEnabled(p, false) } catch (_: Exception) { }
+                try {
+                    locationManager.setTestProviderEnabled(p, false)
+                    addBehaviorLog("  ⬇️ 禁用 $p")
+                } catch (e: Exception) {
+                    addBehaviorLog("  ⚠️ 禁用 $p 失败: ${e.message}")
+                }
                 delay(200)
                 if (!started.get()) return@launch
-                try { locationManager.setTestProviderEnabled(p, true) } catch (_: Exception) { }
+                try {
+                    locationManager.setTestProviderEnabled(p, true)
+                    addBehaviorLog("  ⬆️ 启用 $p")
+                } catch (e: Exception) {
+                    addBehaviorLog("  ⚠️ 启用 $p 失败: ${e.message}")
+                }
                 delay(300)
                 if (!started.get()) return@launch
             }
+            addBehaviorLog("✅ Toggle 序列完成")
 
-            // 4. 再次注入
+            // 4. 再推一次
             pushMockLoc()
             delay(200)
             if (!started.get()) return@launch
             pushMockLoc()
 
-            // 5. 定时注入循环（800~1500ms 随机 — 缓存lastKnownLocation + 保活）
+            // 5. 定时注入
+            addBehaviorLog("🔁 定时注入开始 (${INJECT_MIN_MS}~${INJECT_MAX_MS}ms)")
             while (isActive && started.get()) {
                 pushMockLoc()
                 delay(INJECT_MIN_MS + (Math.random() * (INJECT_MAX_MS - INJECT_MIN_MS)).toLong())
             }
+            addBehaviorLog("⏹ 定时注入结束")
         }
     }
 
     /**
-     * pushMockLoc — 向 PUSH_PROVIDERS（GPS + NETWORK）注入坐标
+     * pushMockLoc — 向 PUSH_PROVIDERS（GPS + NETWORK + FUSED）注入坐标
      * 附带：
-     * 1. 反射隐藏 mock 标记
-     * 2. 主动广播 PROVIDERS_CHANGED + GPS_FIX_CHANGE
-     * 3. 精度随机
+     * 1. 广播 PROVIDERS_CHANGED + GPS_FIX_CHANGE
+     * 2. requestSingleUpdate 直接唤醒系统 dispatch
+     * 3. 精度随机、反射隐藏 mock
      */
     private fun pushMockLoc() {
         if (!started.get()) return
@@ -225,31 +279,65 @@ class MockLocationService : Service() {
                         }
                         hideMockFlag(location)
                         locationManager.setTestProviderLocation(provider, location)
-                        // 主动广播，强制唤醒地图SDK的 LocationListener
-                        sendLocationBroadcast()
+                        // 触发系统位置广播
+                        sendLocationBroadcast(provider)
+                        // 直接请求单次更新，强制 dispatch 给所有监听器
+                        triggerSingleUpdate(provider)
                     } catch (e: Exception) {
-                        // provider 失效，重建
+                        addBehaviorLog("⚠️ setTestProviderLocation($provider) 失败: ${e.message}")
+                        // 重建
                         rebuildProvider(provider, locArr[0], locArr[1])
                     }
                 }
             }
-        } catch (_: Exception) { }
-        finally {
+        } catch (e: Exception) {
+            addBehaviorLog("❌ pushMockLoc 异常: ${e.message}")
+        } finally {
             injectInProgress.set(false)
         }
     }
 
     /**
-     * 发送系统位置广播，主动触发地图APP的 onLocationChanged 回调
+     * 发送系统位置广播
      */
-    private fun sendLocationBroadcast() {
+    private fun sendLocationBroadcast(provider: String) {
         try {
-            // 方案1：PROVIDERS_CHANGED — 通知所有APP位置提供者状态变化
             sendBroadcast(Intent("android.location.PROVIDERS_CHANGED"))
-            // 方案2：GPS_FIX_CHANGE — 通知GPS定位已更新
-            val gpsIntent = Intent("android.location.GPS_FIX_CHANGE")
-            gpsIntent.putExtra("enabled", true)
-            sendBroadcast(gpsIntent)
+            if (provider == LocationManager.GPS_PROVIDER) {
+                val gpsIntent = Intent("android.location.GPS_FIX_CHANGE")
+                gpsIntent.putExtra("enabled", true)
+                sendBroadcast(gpsIntent)
+            }
+        } catch (_: Exception) { }
+    }
+
+    /**
+     * 调用 requestSingleUpdate 直接触发系统 dispatch
+     * 这比广播更可靠——它会直接走系统 Binder 路径 dispatch 给已注册的 LocationListener
+     */
+    private fun triggerSingleUpdate(provider: String) {
+        try {
+            val locArr = currentLocationRef.get()
+            val location = Location(provider).apply {
+                latitude = locArr[0]
+                longitude = locArr[1]
+                altitude = 0.0
+                accuracy = randomAccuracy()
+                bearing = 0f
+                speed = 1.0f  // 有速度更像真实移动
+                time = System.currentTimeMillis()
+                elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
+            }
+            hideMockFlag(location)
+
+            // requestSingleUpdate 参数：provider, criteria, pendingIntent 或 listener
+            // 这里我们用一个临时 listener 来触发 dispatch
+            val tmpListener = object : android.location.LocationListener {
+                override fun onLocationChanged(loc: Location) { }
+                override fun onProviderEnabled(p: String) { }
+                override fun onProviderDisabled(p: String) { }
+            }
+            locationManager.requestSingleUpdate(provider, tmpListener, Looper.getMainLooper())
         } catch (_: Exception) { }
     }
 
@@ -257,6 +345,7 @@ class MockLocationService : Service() {
      * 重建失效的 test provider
      */
     private fun rebuildProvider(provider: String, lat: Double, lon: Double) {
+        addBehaviorLog("🔄 重建 Provider: $provider")
         try {
             try { locationManager.removeTestProvider(provider) } catch (_: Exception) { }
             locationManager.addTestProvider(
@@ -266,6 +355,8 @@ class MockLocationService : Service() {
                 android.location.Criteria.ACCURACY_FINE
             )
             locationManager.setTestProviderEnabled(provider, true)
+            addBehaviorLog("  ✅ addTestProvider($provider) 成功")
+
             val location = Location(provider).apply {
                 this.latitude = lat
                 this.longitude = lon
@@ -278,11 +369,15 @@ class MockLocationService : Service() {
             }
             hideMockFlag(location)
             locationManager.setTestProviderLocation(provider, location)
-        } catch (_: Exception) { }
+            sendLocationBroadcast(provider)
+            triggerSingleUpdate(provider)
+        } catch (e: Exception) {
+            addBehaviorLog("  ❌ 重建 $provider 失败: ${e.message}")
+        }
     }
 
     /**
-     * 设置全量 test provider（GPS + NETWORK + PASSIVE + FUSED）
+     * 设置全量 test provider（GPS + NETWORK + FUSED + PASSIVE）
      */
     private fun setupAllProviders() {
         for (provider in ALL_PROVIDERS) {
@@ -295,39 +390,37 @@ class MockLocationService : Service() {
                     android.location.Criteria.ACCURACY_FINE
                 )
                 locationManager.setTestProviderEnabled(provider, true)
-            } catch (_: Exception) { }
+                addBehaviorLog("  ✅ $provider 设置成功")
+            } catch (e: Exception) {
+                addBehaviorLog("  ⚠️ $provider 设置失败: ${e.message}")
+            }
         }
     }
 
     /**
      * 更新坐标 — 带平滑过渡
-     *
-     * 方案2：坐标变更时不做一次性跳变，而是分 SMOOTH_STEPS 步
-     * 逐步从当前位置过渡到目标位置，地图SDK识别为连续移动自动刷新
      */
     fun updateTargetLocation(lat: Double, lon: Double) {
         val current = currentLocationRef.get()
         val oldLat = current[0]
         val oldLon = current[1]
+        addBehaviorLog("🎯 更新坐标: %.6f,%.6f (旧: %.6f,%.6f)".format(lat, lon, oldLat, oldLon))
 
-        // 立即更新缓存坐标，后续定时注入会延续终点
         currentLocationRef.set(doubleArrayOf(lat, lon))
 
-        // 如果没在运行或距离太近，直接注入一次
         if (!started.get() || (Math.abs(lat - oldLat) < 0.00001 && Math.abs(lon - oldLon) < 0.00001)) {
             mockScope?.launch { pushMockLoc() }
+            addBehaviorLog("  → 距离太近，直接注入")
             return
         }
 
-        // 平滑过渡：分步从旧坐标走向新坐标
         val scope = mockScope
         if (scope != null) {
             scope.launch {
-                // 加入微小抖动，让每一步看起来像「自然走动」
+                addBehaviorLog("  → 平滑过渡开始: ${SMOOTH_STEPS}步, 每步${STEP_DELAY_MS}ms")
                 for (step in 1..SMOOTH_STEPS) {
                     if (!started.get()) return@launch
                     val t = step.toDouble() / SMOOTH_STEPS
-                    // 线性插值 + 微小随机抖动
                     val jitterLat = (Math.random() - 0.5) * STEP_RANGE
                     val jitterLon = (Math.random() - 0.5) * STEP_RANGE
                     val stepLat = oldLat + (lat - oldLat) * t + jitterLat
@@ -336,8 +429,8 @@ class MockLocationService : Service() {
                     pushMockLoc()
                     delay(STEP_DELAY_MS)
                 }
-                // 最后推一次精确终点
                 if (started.get()) {
+                    addBehaviorLog("  → 平滑过渡完成，推终点")
                     currentLocationRef.set(doubleArrayOf(lat, lon))
                     pushMockLoc()
                 }
@@ -363,24 +456,30 @@ class MockLocationService : Service() {
     }
 
     private fun stopMocking() {
+        addBehaviorLog("⏹ 停止模拟定位")
         started.set(false)
         stopAll()
     }
 
     private fun stopAll() {
+        addBehaviorLog("⏹ stopAll: 清理 Provider + 停止前台服务")
         isRunning = false
         injectJob?.cancel()
         mockScope?.cancel()
         mockScope = null
 
         for (p in ALL_PROVIDERS) {
-            try { locationManager.removeTestProvider(p) } catch (_: Exception) { }
+            try {
+                locationManager.removeTestProvider(p)
+                addBehaviorLog("  🗑 removeTestProvider($p)")
+            } catch (_: Exception) { }
         }
         try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) { }
         stopSelf()
     }
 
     override fun onDestroy() {
+        addBehaviorLog("📱 Service onDestroy")
         started.set(false)
         isRunning = false
         injectJob?.cancel()

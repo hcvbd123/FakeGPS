@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.os.Looper
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.fakegps.app.service.MockLocationService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -152,13 +153,15 @@ class DiagnosticViewModel : ViewModel() {
         // 首次扫描 provider 状态
         updateProviderStates(lm)
 
-        // 每秒刷新 provider 状态
+        // 每秒刷新 provider 状态 + 读取行为日志
         monitorJob?.cancel()
         monitorJob = viewModelScope.launch(Dispatchers.IO) {
             while (isActive) {
                 delay(2000)
                 try {
                     lm?.let { updateProviderStates(it) }
+                    // 从 Service 读取行为日志
+                    syncBehaviorLog()
                 } catch (_: Exception) { }
             }
         }
@@ -186,6 +189,28 @@ class DiagnosticViewModel : ViewModel() {
             }
 
             _uiState.value = _uiState.value.copy(providers = states)
+        } catch (_: Exception) { }
+    }
+
+    /**
+     * 从 MockLocationService 同步行为日志到诊断 UI
+     */
+    private fun syncBehaviorLog() {
+        try {
+            val serviceLog = MockLocationService.getBehaviorLog()
+            if (serviceLog.isEmpty()) return
+            val currentLog = _uiState.value.log
+            // 只追加新日志（去重：用 Service 日志的最后一条作为边界）
+            val lastCurrent = if (currentLog.isNotEmpty()) currentLog.last() else ""
+            // 如果最后一条已经存在就不追加
+            if (currentLog.contains(serviceLog.last())) return
+            // 追加所有不在当前日志中的 Service 日志
+            val toAdd = serviceLog.filter { !currentLog.contains(it) }
+            if (toAdd.isEmpty()) return
+            val newLog = currentLog + toAdd
+            _uiState.value = _uiState.value.copy(
+                log = if (newLog.size > 500) newLog.drop(newLog.size - 500) else newLog
+            )
         } catch (_: Exception) { }
     }
 
