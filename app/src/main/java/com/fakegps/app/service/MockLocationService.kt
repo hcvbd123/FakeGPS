@@ -53,8 +53,8 @@ class MockLocationService : Service() {
         }
         private val PASSIVE_PROVIDER = LocationManager.PASSIVE_PROVIDER
 
-        /** 主动推送的目标（三个：GPS + NETWORK + FUSED 全推） */
-        private val PUSH_PROVIDERS = listOf(GPS_PROVIDER, NETWORK_PROVIDER, FUSED_PROVIDER)
+        /** 主动推送的目标（仅 GPS — 系统 Fused 会自动融合到其他 provider） */
+        private val PUSH_PROVIDERS = listOf(GPS_PROVIDER)
         /** 全量 Provider：用于 setup / cleanup */
         private val ALL_PROVIDERS = listOf(
             GPS_PROVIDER, NETWORK_PROVIDER, FUSED_PROVIDER, PASSIVE_PROVIDER
@@ -277,8 +277,8 @@ class MockLocationService : Service() {
             if (!started.get()) return@launch
             pushMockLoc()
 
-            // 3. Toggle 序列
-            addBehaviorLog("🔄 Toggle 序列开始: ${TOGGLE_SEQUENCE.joinToString("→")}")
+            // 3. Toggle 序列（仅对 GPS）
+            addBehaviorLog("🔄 Toggle 序列开始: GPS")
             for (p in TOGGLE_SEQUENCE) {
                 if (!started.get()) return@launch
                 try {
