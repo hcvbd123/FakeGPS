@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicReference
  * 5. ✅ 启动/停止用独立 CoroutineScope 防泄漏
  *
  * 工作原理（仿 Fake Location）：
- * - 只 mock GPS_PROVIDER（单 Provider 最大兼容）
+ * - 只 mock GPS + NETWORK（双 Provider 让 fused 同步）
  * - 定时注入取代拦截器，不再监听任何 provider
  * - setTestProviderLocation 带互斥锁 + 防重入双重保护
  */
@@ -41,9 +41,10 @@ class MockLocationService : Service() {
         const val EXTRA_LON = "lon"
 
         private val GPS_PROVIDER = LocationManager.GPS_PROVIDER
+        private val NETWORK_PROVIDER = LocationManager.NETWORK_PROVIDER
 
-        // 只 mock GPS_PROVIDER（单 Provider 最大兼容）
-        private val MOCK_PROVIDERS = listOf(GPS_PROVIDER)
+        // mock GPS + NETWORK（HMS fused 跟随 NETWORK，所以两个都 mock）
+        private val MOCK_PROVIDERS = listOf(GPS_PROVIDER, NETWORK_PROVIDER)
 
         // 注入间隔 300~500ms 随机 — 降频后 Binder IPC 不饱和，防卡死
         private const val INJECT_MIN_MS = 300L
@@ -151,11 +152,15 @@ class MockLocationService : Service() {
             if (!started.get()) return@launch
             safeInject()
 
-            // 3. Toggle GPS 一次（激活 test provider）
-            try { locationManager.setTestProviderEnabled(GPS_PROVIDER, false) } catch (_: Exception) { }
+            // 3. Toggle GPS+NETWORK（激活 test provider）
+            for (p in MOCK_PROVIDERS) {
+                try { locationManager.setTestProviderEnabled(p, false) } catch (_: Exception) { }
+            }
             delay(200)
             if (!started.get()) return@launch
-            try { locationManager.setTestProviderEnabled(GPS_PROVIDER, true) } catch (_: Exception) { }
+            for (p in MOCK_PROVIDERS) {
+                try { locationManager.setTestProviderEnabled(p, true) } catch (_: Exception) { }
+            }
             delay(300)
             if (!started.get()) return@launch
 
@@ -192,70 +197,73 @@ class MockLocationService : Service() {
     }
 
     /**
-     * 向 GPS 注入当前坐标
+     * 向所有 mock provider 注入当前坐标
      */
     private fun doInject() {
         val now = System.currentTimeMillis()
         val elapsedNs = SystemClock.elapsedRealtimeNanos()
         val locArr = currentLocationRef.get()
 
-        // 只 mock GPS_PROVIDER
-        try {
-            val location = Location(GPS_PROVIDER).apply {
-                latitude = locArr[0]
-                longitude = locArr[1]
-                altitude = 0.0
-                accuracy = MOCK_ACCURACY
-                bearing = 0f
-                speed = 0f
-                time = now
-                elapsedRealtimeNanos = elapsedNs
-            }
-            hideMockFlag(location)
-            locationManager.setTestProviderLocation(GPS_PROVIDER, location)
-        } catch (e: Exception) {
-            // provider 失效，重建
+        for (provider in MOCK_PROVIDERS) {
             try {
-                locationManager.removeTestProvider(GPS_PROVIDER)
-            } catch (_: Exception) { }
-            try {
-                locationManager.addTestProvider(
-                    GPS_PROVIDER,
-                    false, false, false, false, false, true, true,
-                    android.location.Criteria.POWER_LOW,
-                    android.location.Criteria.ACCURACY_FINE
-                )
-                locationManager.setTestProviderEnabled(GPS_PROVIDER, true)
-            } catch (_: Exception) { }
-            // 重建后重新注入
-            try {
-                val location = Location(GPS_PROVIDER).apply {
+                val location = Location(provider).apply {
                     latitude = locArr[0]
                     longitude = locArr[1]
                     altitude = 0.0
                     accuracy = MOCK_ACCURACY
                     bearing = 0f
                     speed = 0f
-                    time = System.currentTimeMillis()
-                    elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
+                    time = now
+                    elapsedRealtimeNanos = elapsedNs
                 }
                 hideMockFlag(location)
-                locationManager.setTestProviderLocation(GPS_PROVIDER, location)
-            } catch (_: Exception) { }
+                locationManager.setTestProviderLocation(provider, location)
+            } catch (e: Exception) {
+                // provider 失效，重建
+                try {
+                    locationManager.removeTestProvider(provider)
+                } catch (_: Exception) { }
+                try {
+                    locationManager.addTestProvider(
+                        provider,
+                        false, false, false, false, false, true, true,
+                        android.location.Criteria.POWER_LOW,
+                        android.location.Criteria.ACCURACY_FINE
+                    )
+                    locationManager.setTestProviderEnabled(provider, true)
+                } catch (_: Exception) { }
+                // 重建后重新注入
+                try {
+                    val location = Location(provider).apply {
+                        latitude = locArr[0]
+                        longitude = locArr[1]
+                        altitude = 0.0
+                        accuracy = MOCK_ACCURACY
+                        bearing = 0f
+                        speed = 0f
+                        time = System.currentTimeMillis()
+                        elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
+                    }
+                    hideMockFlag(location)
+                    locationManager.setTestProviderLocation(provider, location)
+                } catch (_: Exception) { }
+            }
         }
     }
 
     private fun setupProvider() {
-        try { locationManager.removeTestProvider(GPS_PROVIDER) } catch (_: Exception) { }
-        try {
-            locationManager.addTestProvider(
-                GPS_PROVIDER,
-                false, false, false, false, false, true, true,
-                android.location.Criteria.POWER_LOW,
-                android.location.Criteria.ACCURACY_FINE
-            )
-            locationManager.setTestProviderEnabled(GPS_PROVIDER, true)
-        } catch (_: Exception) { }
+        for (provider in MOCK_PROVIDERS) {
+            try { locationManager.removeTestProvider(provider) } catch (_: Exception) { }
+            try {
+                locationManager.addTestProvider(
+                    provider,
+                    false, false, false, false, false, true, true,
+                    android.location.Criteria.POWER_LOW,
+                    android.location.Criteria.ACCURACY_FINE
+                )
+                locationManager.setTestProviderEnabled(provider, true)
+            } catch (_: Exception) { }
+        }
     }
 
     fun updateTargetLocation(lat: Double, lon: Double) {
@@ -293,7 +301,9 @@ class MockLocationService : Service() {
         mockScope?.cancel()
         mockScope = null
 
-        try { locationManager.removeTestProvider(GPS_PROVIDER) } catch (_: Exception) { }
+        for (p in MOCK_PROVIDERS) {
+            try { locationManager.removeTestProvider(p) } catch (_: Exception) { }
+        }
         try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) { }
         stopSelf()
     }
@@ -303,7 +313,9 @@ class MockLocationService : Service() {
         isRunning = false
         injectJob?.cancel()
         mockScope?.cancel()
-        try { locationManager.removeTestProvider(GPS_PROVIDER) } catch (_: Exception) { }
+        for (p in MOCK_PROVIDERS) {
+            try { locationManager.removeTestProvider(p) } catch (_: Exception) { }
+        }
         try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) { }
         super.onDestroy()
     }
