@@ -7,7 +7,4 @@ public class XC_LoadPackage extends XCallback {
     }
     public XC_LoadPackage() { super(); }
     public void handleLoadPackage(LoadPackageParam lpparam) throws Throwable {}
-    public static abstract class XCallback implements IXposedMod {
-        public XCallback() {} public int getPriority() { return 50; }
-    }
 }
