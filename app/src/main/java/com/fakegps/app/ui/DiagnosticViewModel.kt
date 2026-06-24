@@ -55,7 +55,12 @@ class DiagnosticViewModel : ViewModel() {
     fun startMonitoring(context: Context) {
         if (_uiState.value.isMonitoring) return
 
-        locationManager = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        try {
+            locationManager = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        } catch (e: Exception) {
+            addLog("❌ 获取 LocationManager 失败: ${e.message}")
+            return
+        }
         val lm = locationManager ?: return
 
         _uiState.value = _uiState.value.copy(isMonitoring = true, log = emptyList())
@@ -106,7 +111,8 @@ class DiagnosticViewModel : ViewModel() {
         val providers = listOf(
             LocationManager.GPS_PROVIDER,
             LocationManager.NETWORK_PROVIDER,
-            LocationManager.PASSIVE_PROVIDER
+            LocationManager.PASSIVE_PROVIDER,
+            "fused"
         )
 
         var successCount = 0

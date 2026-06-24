@@ -50,10 +50,11 @@ class MockLocationService : Service() {
         } else {
             "fused"
         }
-        // 方案一：仿Fake Location，只mock GPS+NETWORK
-        // PASSIVE 和 FUSED 不做 test provider（但在拦截器中仍监听）
-        private val MOCK_PROVIDERS = listOf(GPS_PROVIDER, NETWORK_PROVIDER)
-        private val INTERCEPTOR_PROVIDERS = listOf(PASSIVE_PROVIDER, GPS_PROVIDER, NETWORK_PROVIDER, FUSED_PROVIDER)
+        // 只 mock GPS_PROVIDER（最兼容，仿Fake Location单Provider模式）
+        // OPPO/ColorOS 上 mock 多个 provider 可能导致 addTestProvider 被拒绝
+        // 其余 provider 仅通过拦截器监听
+        private val MOCK_PROVIDERS = listOf(GPS_PROVIDER)
+        private val INTERCEPTOR_PROVIDERS = listOf(GPS_PROVIDER, NETWORK_PROVIDER, PASSIVE_PROVIDER, FUSED_PROVIDER)
 
         private const val INJECT_BG_MIN = 100L   // 背景注入最小间隔
         private const val INJECT_BG_MAX = 180L   // 背景注入最大间隔（随机）
@@ -153,7 +154,9 @@ class MockLocationService : Service() {
             try {
                 setupProviders()
                 startForeground(NOTIFICATION_ID, buildNotification())
-            } catch (_: Exception) { }
+            } catch (e: Exception) {
+                android.util.Log.e("FakeGPS", "setup failed", e)
+            }
 
             // 检查是否在等待期间被停止
             if (!started.get()) return@launch
@@ -161,12 +164,12 @@ class MockLocationService : Service() {
             delay(500)
             if (!started.get()) return@launch
 
-            // ⭐ Toggle 序列
-            toggleNetworkOnce("toggle-1")
+            // ⭐ Toggle 序列 — 简化版：只 toggle GPS
+            try { locationManager.setTestProviderEnabled(GPS_PROVIDER, false) } catch (_: Exception) { }
+            delayOrCancel(200)
             if (!started.get()) return@launch
-            toggleGpsOnce()
-            if (!started.get()) return@launch
-            toggleNetworkOnce("toggle-2")
+            try { locationManager.setTestProviderEnabled(GPS_PROVIDER, true) } catch (_: Exception) { }
+            delayOrCancel(300)
             if (!started.get()) return@launch
 
             // 先预注入
@@ -189,19 +192,9 @@ class MockLocationService : Service() {
         }
     }
 
-    private suspend fun toggleNetworkOnce(tag: String) {
-        try { locationManager.setTestProviderEnabled(NETWORK_PROVIDER, false) } catch (_: Exception) { }
-        delayOrCancel(200)
-        try { locationManager.setTestProviderEnabled(NETWORK_PROVIDER, true) } catch (_: Exception) { }
-        delayOrCancel(300)
-    }
 
-    private suspend fun toggleGpsOnce() {
-        try { locationManager.setTestProviderEnabled(GPS_PROVIDER, false) } catch (_: Exception) { }
-        delayOrCancel(200)
-        try { locationManager.setTestProviderEnabled(GPS_PROVIDER, true) } catch (_: Exception) { }
-        delayOrCancel(300)
-    }
+
+
 
     private suspend fun delayOrCancel(ms: Long) {
         // 分段延迟+检查停止标记
@@ -297,13 +290,13 @@ class MockLocationService : Service() {
                 }
                 hideMockFlag(location)
                 locationManager.setTestProviderLocation(provider, location)
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                android.util.Log.w("FakeGPS", "inject failed for $provider: ${e.message}")
                 // provider 失效，重建
                 try {
                     locationManager.removeTestProvider(provider)
                 } catch (_: Exception) { }
                 try {
-                    // ⭐ fused 不需要 requiresSatellite/requiresNetwork（参考FakeTraveler）
                     locationManager.addTestProvider(
                         provider,
                         false, false, false, false, false, true, true,
@@ -311,7 +304,11 @@ class MockLocationService : Service() {
                         android.location.Criteria.ACCURACY_FINE
                     )
                     locationManager.setTestProviderEnabled(provider, true)
-                } catch (_: Exception) { }
+                    android.util.Log.i("FakeGPS", "addTestProvider($provider) rebuilt")
+                } catch (e2: Exception) {
+                    // addTestProvider 失败 = 未设置模拟位置应用
+                    android.util.Log.w("FakeGPS", "addTestProvider($provider) FAILED: ${e2.message}")
+                }
                 // 重建后重新注入
                 try {
                     val location = Location(provider).apply {
@@ -331,11 +328,11 @@ class MockLocationService : Service() {
         }
     }
 
-    private fun setupProviders() {
+    private fun setupProviders(): Boolean {
+        var allOk = true
         for (provider in MOCK_PROVIDERS) {
             try { locationManager.removeTestProvider(provider) } catch (_: Exception) { }
             try {
-                // ⭐ fused 不需要 requiresSatellite/requiresNetwork（参考FakeTraveler）
                 locationManager.addTestProvider(
                     provider,
                     false, false, false, false, false, true, true,
@@ -343,8 +340,16 @@ class MockLocationService : Service() {
                     android.location.Criteria.ACCURACY_FINE
                 )
                 locationManager.setTestProviderEnabled(provider, true)
-            } catch (_: Exception) { }
+                android.util.Log.i("FakeGPS", "addTestProvider($provider) OK")
+            } catch (e: Exception) {
+                allOk = false
+                android.util.Log.w("FakeGPS", "addTestProvider($provider) FAILED: ${e.message}")
+            }
         }
+        if (!allOk) {
+            android.util.Log.e("FakeGPS", "addTestProvider FAILED — 检查开发者选项中是否已设置本应用为模拟位置应用")
+        }
+        return allOk
     }
 
     // ⭐ 所有更新坐标的入口统一走这里（线程安全）
