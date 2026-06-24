@@ -110,13 +110,20 @@ class MockLocationService : Service() {
     override fun onCreate() {
         super.onCreate()
         try { createNotificationChannel() } catch (_: Exception) { }
-        locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        try {
+            locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        } catch (e: Exception) {
+            // 部分厂商可能返回 null
+            stopSelf()
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         try {
+            // 确保 locationManager 已初始化
+            if (!::locationManager.isInitialized) return START_NOT_STICKY
             when (intent?.action) {
                 ACTION_START -> {
                     val lat = intent.getDoubleExtra(EXTRA_LAT, 0.0)
@@ -125,8 +132,11 @@ class MockLocationService : Service() {
                 }
                 ACTION_STOP -> stopMocking()
             }
-        } catch (_: Exception) { }
-        return START_STICKY
+        } catch (e: Exception) {
+            // OPPO等厂商可能因异常闪退，全部兜底
+            try { stopMockingInner() } catch (_: Exception) { }
+        }
+        return START_NOT_STICKY  // 防系统重复重启崩溃服务
     }
 
     private fun startMocking(lat: Double, lon: Double) {
