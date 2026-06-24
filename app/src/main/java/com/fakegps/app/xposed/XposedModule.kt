@@ -6,7 +6,6 @@ import android.net.wifi.WifiManager
 import android.net.wifi.ScanResult
 import de.robv.android.xposed.*
 import de.robv.android.xposed.callbacks.XC_LoadPackage
-import de.robv.android.xposed.callbacks.XC_InitPackageResources
 import java.io.File
 
 /**
