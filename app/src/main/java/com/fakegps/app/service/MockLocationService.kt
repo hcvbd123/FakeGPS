@@ -99,13 +99,7 @@ class MockLocationService : Service() {
 
         // 精度随机 — 按 provider 类型模拟真实精度特征
         private fun accuracyForProvider(provider: String): Float {
-            return when (provider) {
-                GPS_PROVIDER -> 3.0f + (Math.random() * 7).toFloat()           // 3~10m 高精度
-                NETWORK_PROVIDER -> 180f + (Math.random() * 170).toFloat()      // 180~350m 低精度
-                FUSED_PROVIDER -> 8f + (Math.random() * 17).toFloat()           // 8~25m 中精度
-                PASSIVE_PROVIDER -> 6f + (Math.random() * 14).toFloat()         // 6~20m 中精度
-                else -> 10f
-            }
+            return 1.0f // 全部 1 米精度
         }
 
         // 反射隐藏 mock 标记
@@ -175,20 +169,12 @@ class MockLocationService : Service() {
             } catch (_: Exception) { }
         }
 
-        // 对一个 Location 应用所有精度字段（按 provider 区分精度）
+        // 对一个 Location 应用所有精度字段（全部 1 米）
         private fun applyFullAccuracyFields(loc: Location, provider: String) {
-            loc.accuracy = accuracyForProvider(provider)
-            // 垂直精度：GPS 模拟真实精度，其他 provider 降低
-            val vertAcc = when (provider) {
-                GPS_PROVIDER -> 5 + (Math.random() * 30).toFloat()          // 5~35m
-                NETWORK_PROVIDER -> 50 + (Math.random() * 100).toFloat()     // 50~150m
-                FUSED_PROVIDER -> 15 + (Math.random() * 35).toFloat()        // 15~50m
-                PASSIVE_PROVIDER -> 10 + (Math.random() * 30).toFloat()      // 10~40m
-                else -> 10f
-            }
-            setVerticalAccuracy(loc, vertAcc)
-            setSpeedAccuracy(loc, 0.1f + (Math.random() * 1.5f).toFloat())  // 0.1~1.6 m/s 速度精度
-            setBearingAccuracy(loc, 3 + (Math.random() * 25).toFloat())     // 3~28° 方向精度
+            loc.accuracy = 1.0f
+            setVerticalAccuracy(loc, 1.0f)
+            setSpeedAccuracy(loc, 0.1f)
+            setBearingAccuracy(loc, 1.0f)
         }
 
         @Volatile
