@@ -55,10 +55,11 @@ class MockLocationService : Service() {
         private val MOCK_PROVIDERS = listOf(GPS_PROVIDER, NETWORK_PROVIDER)
         private val INTERCEPTOR_PROVIDERS = listOf(PASSIVE_PROVIDER, GPS_PROVIDER, NETWORK_PROVIDER, FUSED_PROVIDER)
 
-        private const val INJECT_BG_MS = 100L
+        private const val INJECT_BG_MIN = 100L   // 背景注入最小间隔
+        private const val INJECT_BG_MAX = 180L   // 背景注入最大间隔（随机）
         private const val BURST_COUNT = 5
         private const val BURST_INTERVAL_MS = 10L
-        private const val MOCK_ACCURACY = 0.5f
+        private const val MOCK_ACCURACY = 1.2f   // 仿Fake Location精度
 
         // 反射隐藏 mock 标记（线程安全 + 懒加载）
         private val hideMockFlagMethod = AtomicReference<Method?>(null)
@@ -172,7 +173,7 @@ class MockLocationService : Service() {
             bgInjectJob = scope.launch {
                 while (isActive && started.get()) {
                     safeInjectAll()
-                    delay(INJECT_BG_MS)
+                    delay(INJECT_BG_MIN + (Math.random() * (INJECT_BG_MAX - INJECT_BG_MIN)).toLong())
                 }
             }
         }
