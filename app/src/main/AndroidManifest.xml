@@ -30,17 +30,6 @@
         android:label="虚拟GPS"
         android:theme="@style/Theme.FakeGPS">
 
-        <!-- LSPosed 模块声明 -->
-        <meta-data
-            android:name="xposedmodule"
-            android:value="true" />
-        <meta-data
-            android:name="xposeddescription"
-            android:value="虚拟GPS定位辅助 - Hook目标App的WifiManager/Location检测" />
-        <meta-data
-            android:name="xposedminversion"
-            android:value="53" />
-
         <!-- 模拟定位服务 -->
         <service
             android:name=".service.MockLocationService"

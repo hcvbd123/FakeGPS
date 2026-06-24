@@ -8,7 +8,6 @@ import androidx.lifecycle.viewModelScope
 import com.fakegps.app.models.KmlParser
 import com.fakegps.app.models.KmlPlacemark
 import com.fakegps.app.service.MockLocationService
-import com.fakegps.app.service.RootHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -30,11 +29,7 @@ data class UiState(
     val currentLat: Double = 0.0,
     val currentLon: Double = 0.0,
     val kmlFiles: List<String> = emptyList(),
-    val isScanning: Boolean = false,
-    // LSPosed 相关
-    val hasRoot: Boolean = false,
-    val targetPkgName: String = "",
-    val rootMessage: String = ""
+    val isScanning: Boolean = false
 )
 
 class MainViewModel : ViewModel() {
@@ -160,10 +155,8 @@ class MainViewModel : ViewModel() {
         val firstIdx = selected.first()
         val firstPm = state.placemarks[firstIdx]
 
-        // 停止旧模拟
         context.stopService(Intent(context, MockLocationService::class.java))
 
-        // 所有模式现在都使用 ACTION_START（我们移除了巡航功能）
         val intent = Intent(context, MockLocationService::class.java).apply {
             action = MockLocationService.ACTION_START
             putExtra(MockLocationService.EXTRA_LAT, firstPm.latitude)
@@ -195,41 +188,6 @@ class MainViewModel : ViewModel() {
         _uiState.value = _uiState.value.copy(
             floatingEnabled = !_uiState.value.floatingEnabled
         )
-    }
-
-    fun checkRoot() {
-        val hasRoot = RootHelper.checkRoot()
-        _uiState.value = _uiState.value.copy(
-            hasRoot = hasRoot,
-            rootMessage = if (hasRoot) "已获取 ROOT 权限 ✅" else "未获取 ROOT 权限"
-        )
-    }
-
-    fun setTargetPackage(pkgName: String) {
-        _uiState.value = _uiState.value.copy(targetPkgName = pkgName)
-        if (pkgName.isBlank()) return
-        viewModelScope.launch(Dispatchers.IO) {
-            val ok = RootHelper.writeTargetPackage(pkgName)
-            if (ok) {
-                _uiState.value = _uiState.value.copy(
-                    rootMessage = "目标包名已写入: $pkgName ✅"
-                )
-            } else {
-                _uiState.value = _uiState.value.copy(
-                    errorMessage = "写入目标包名失败，请检查 ROOT 权限"
-                )
-            }
-        }
-    }
-
-    fun clearTargetPackage() {
-        viewModelScope.launch(Dispatchers.IO) {
-            RootHelper.clearTargetPackage()
-            _uiState.value = _uiState.value.copy(
-                targetPkgName = "",
-                rootMessage = "已清除目标包名"
-            )
-        }
     }
 
     fun clearError() {

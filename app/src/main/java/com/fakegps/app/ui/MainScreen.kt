@@ -48,7 +48,7 @@ fun MainScreen(
     val cardElevation = if (isTablet) 2.dp else 1.dp
     val listItemHeight = if (isTablet) 72.dp else 56.dp
 
-    // KML 文件选择器（从资源管理器选取）
+    // KML 文件选择器
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? -> uri?.let { viewModel.loadKml(context, it) } }
@@ -60,10 +60,9 @@ fun MainScreen(
 
     var showIntervalDialog by remember { mutableStateOf(false) }
 
-    // 首次加载时扫描 KML 文件夹 + 检查 ROOT
+    // 首次加载时扫描 KML 文件夹
     LaunchedEffect(Unit) {
         viewModel.scanKmlFolder(context)
-        viewModel.checkRoot()
     }
 
     Scaffold(
@@ -173,7 +172,7 @@ fun MainScreen(
                                     fontSize = if (isTablet) 14.sp else 13.sp)
                             }
 
-                            // 🟢 开始按钮（代替之前巡航按钮的行为）
+                            // 🟢 开始按钮
                             Button(
                                 onClick = { viewModel.startSimulation(context) },
                                 modifier = Modifier.weight(if (isTablet) 3f else 2f),
@@ -193,7 +192,7 @@ fun MainScreen(
                                 )
                             }
 
-                            // 停止按钮（运行时显示）
+                            // 停止按钮
                             if (state.isStarted) {
                                 FilledTonalButton(
                                     onClick = {
@@ -295,58 +294,6 @@ fun MainScreen(
                 }
             }
 
-            // ==================== LSPosed / ROOT 模式配置面板 ====================
-            Card(
-                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = if (state.hasRoot) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f)
-                                    else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-                )
-            ) {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            if (state.hasRoot) Icons.Default.Verified else Icons.Default.Security,
-                            contentDescription = null,
-                            tint = if (state.hasRoot) MaterialTheme.colorScheme.tertiary
-                                   else MaterialTheme.colorScheme.outline,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text("LSPosed / ROOT", fontWeight = FontWeight.Bold,
-                            fontSize = if (isCompact) 13.sp else 14.sp)
-                        Spacer(Modifier.weight(1f))
-                        TextButton(
-                            onClick = { viewModel.checkRoot() },
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-                        ) {
-                            Text("检测", fontSize = 12.sp)
-                        }
-                    }
-
-                    Text(state.rootMessage,
-                        fontSize = 12.sp,
-                        color = if (state.hasRoot) MaterialTheme.colorScheme.onTertiaryContainer
-                               else MaterialTheme.colorScheme.onSurfaceVariant)
-
-                    if (state.hasRoot) {
-                        Spacer(Modifier.height(8.dp))
-                        OutlinedTextField(
-                            value = state.targetPkgName,
-                            onValueChange = { viewModel.setTargetPackage(it) },
-                            label = { Text("目标 APP 包名", fontSize = 12.sp) },
-                            placeholder = { Text("com.example.checkin", fontSize = 12.sp) },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
-                            textStyle = TextStyle(fontSize = 13.sp)
-                        )
-                        Spacer(Modifier.height(4.dp))
-                        Text("写入后需重启目标APP使Hook生效", fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.outline)
-                    }
-                }
-            }
-
             // ==================== 空状态：KML 浏览 + 导入 ====================
             if (state.placemarks.isEmpty()) {
                 if (state.kmlFiles.isNotEmpty()) {
@@ -389,7 +336,6 @@ fun MainScreen(
 
                         item {
                             Spacer(Modifier.height(8.dp))
-                            // 资源管理器导入按钮
                             OutlinedButton(
                                 onClick = {
                                     filePickerLauncher.launch(
@@ -409,7 +355,7 @@ fun MainScreen(
                     // 没有任何 KML 文件 → 纯空状态引导
                     if (!state.isScanning) {
                         Spacer(Modifier.height(
-                            if (isTablet) 100.dp else if (isCompact) 40.dp else 60.dp))
+                            if (isTablet) 60.dp else if (isCompact) 20.dp else 30.dp))
                         Column(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalAlignment = Alignment.CenterHorizontally
@@ -460,7 +406,6 @@ fun MainScreen(
 
                             Spacer(Modifier.height(16.dp))
 
-                            // 刷新按钮
                             OutlinedButton(onClick = {
                                 viewModel.scanKmlFolder(context)
                             }) {
@@ -471,6 +416,47 @@ fun MainScreen(
                             }
 
                             Spacer(Modifier.height(12.dp))
+
+                            // ADB 配置提示
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp)
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Default.Usb, contentDescription = null,
+                                            modifier = Modifier.size(18.dp),
+                                            tint = MaterialTheme.colorScheme.secondary)
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("ADB 配置", fontWeight = FontWeight.Bold,
+                                            fontSize = 13.sp)
+                                    }
+                                    Spacer(Modifier.height(4.dp))
+                                    Text(
+                                        "PC连接USB后运行以下命令启用模拟定位：",
+                                        fontSize = 11.sp, color = MaterialTheme.colorScheme.onSecondaryContainer
+                                    )
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = MaterialTheme.colorScheme.surfaceVariant,
+                                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+                                    ) {
+                                        Text(
+                                            "adb shell settings put secure mock_location 1\n" +
+                                            "adb shell appops set com.fakegps.app android:mock_location allow\n" +
+                                            "adb shell cmd location set-extra-location-package-enable com.fakegps.app true",
+                                            fontSize = 10.sp,
+                                            modifier = Modifier.padding(8.dp),
+                                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                        )
+                                    }
+                                }
+                            }
+
+                            Spacer(Modifier.height(20.dp))
 
                             Text("勾选多个坐标后可启动巡航模式",
                                 fontSize = if (isTablet) 14.sp else 12.sp,
@@ -503,7 +489,6 @@ fun MainScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
-                                    // 点击行 = 勾选该行（不再直接模拟）
                                     viewModel.toggleCheck(index)
                                 },
                             shape = RoundedCornerShape(12.dp),
