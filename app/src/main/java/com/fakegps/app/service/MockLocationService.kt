@@ -20,15 +20,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * 模拟定位前台服务 — v20: 行为日志 + fused回满 + requestSingleUpdate
+ * 模拟定位前台服务 — v24: 全4 provider推送 + 按provider区分精度
  *
- * v19 → v20：
- * 1. FUSED 加回 PUSH_PROVIDERS（之前只推 GPS+NETWORK 导致 fused 空白）
- * 2. 新增 BehaviorLog — 全局行为日志，记录每个 provider 操作的时间戳和结果
- * 3. 注入后调用 requestSingleUpdate 直接唤醒系统 dispatch 链
- * 4. 静态方法 getBehaviorLog() / clearBehaviorLog() 供诊断界面读取
- * 5. PUSH_PROVIDERS = [GPS, NETWORK, FUSED]（三个都推，PASSIVE 仅 setup）
- * 6. 保持 800~1500ms 保活降频、平滑过渡、广播唤醒
+ * v24 关键修改：
+ * 1. PUSH_PROVIDERS = [GPS, NETWORK, FUSED, PASSIVE]（4个全推）
+ * 2. 精度策略：GPS=3~10m, NETWORK=180~350m, FUSED=8~25m, PASSIVE=6~20m
+ * 3. 垂直精度也按provider区分
+ * 4. Toggle序列覆盖4个provider
  */
 class MockLocationService : Service() {
 
@@ -53,16 +51,14 @@ class MockLocationService : Service() {
         }
         private val PASSIVE_PROVIDER = LocationManager.PASSIVE_PROVIDER
 
-        /** 主动推送的目标（GPS + NETWORK + FUSED — 非 root 不 Hook 系统服务，必须全推） */
-        private val PUSH_PROVIDERS = listOf(GPS_PROVIDER, NETWORK_PROVIDER, FUSED_PROVIDER)
+        /** 主动推送的目标（GPS + NETWORK + FUSED + PASSIVE — 非 root 必须4个全推） */
+        private val PUSH_PROVIDERS = listOf(GPS_PROVIDER, NETWORK_PROVIDER, FUSED_PROVIDER, PASSIVE_PROVIDER)
         /** 全量 Provider：用于 setup / cleanup */
-        private val ALL_PROVIDERS = listOf(
-            GPS_PROVIDER, NETWORK_PROVIDER, FUSED_PROVIDER, PASSIVE_PROVIDER
-        )
+        private val ALL_PROVIDERS = PUSH_PROVIDERS
 
-        /** Toggle 序列 */
+        /** Toggle 序列 — 覆盖所有 4 个 provider 刷新系统状态 */
         private val TOGGLE_SEQUENCE = listOf(
-            NETWORK_PROVIDER, GPS_PROVIDER, NETWORK_PROVIDER, FUSED_PROVIDER
+            NETWORK_PROVIDER, GPS_PROVIDER, FUSED_PROVIDER, PASSIVE_PROVIDER
         )
 
         // 注入间隔 800~1500ms — 前台 Service 保活
@@ -101,9 +97,15 @@ class MockLocationService : Service() {
         }
         // ===========================================
 
-        // 精度随机
-        private fun randomAccuracy(): Float {
-            return (12 + (Math.random() * 108).toInt()) / 10f
+        // 精度随机 — 按 provider 类型模拟真实精度特征
+        private fun accuracyForProvider(provider: String): Float {
+            return when (provider) {
+                GPS_PROVIDER -> 3.0f + (Math.random() * 7).toFloat()           // 3~10m 高精度
+                NETWORK_PROVIDER -> 180f + (Math.random() * 170).toFloat()      // 180~350m 低精度
+                FUSED_PROVIDER -> 8f + (Math.random() * 17).toFloat()           // 8~25m 中精度
+                PASSIVE_PROVIDER -> 6f + (Math.random() * 14).toFloat()         // 6~20m 中精度
+                else -> 10f
+            }
         }
 
         // 反射隐藏 mock 标记
@@ -173,10 +175,18 @@ class MockLocationService : Service() {
             } catch (_: Exception) { }
         }
 
-        // 对一个 Location 应用所有精度字段
-        private fun applyFullAccuracyFields(loc: Location) {
-            loc.accuracy = randomAccuracy()
-            setVerticalAccuracy(loc, 5 + (Math.random() * 30).toFloat())   // 5~35m 垂直精度
+        // 对一个 Location 应用所有精度字段（按 provider 区分精度）
+        private fun applyFullAccuracyFields(loc: Location, provider: String) {
+            loc.accuracy = accuracyForProvider(provider)
+            // 垂直精度：GPS 模拟真实精度，其他 provider 降低
+            val vertAcc = when (provider) {
+                GPS_PROVIDER -> 5 + (Math.random() * 30).toFloat()          // 5~35m
+                NETWORK_PROVIDER -> 50 + (Math.random() * 100).toFloat()     // 50~150m
+                FUSED_PROVIDER -> 15 + (Math.random() * 35).toFloat()        // 15~50m
+                PASSIVE_PROVIDER -> 10 + (Math.random() * 30).toFloat()      // 10~40m
+                else -> 10f
+            }
+            setVerticalAccuracy(loc, vertAcc)
             setSpeedAccuracy(loc, 0.1f + (Math.random() * 1.5f).toFloat())  // 0.1~1.6 m/s 速度精度
             setBearingAccuracy(loc, 3 + (Math.random() * 25).toFloat())     // 3~28° 方向精度
         }
@@ -317,11 +327,12 @@ class MockLocationService : Service() {
     }
 
     /**
-     * pushMockLoc — 向 PUSH_PROVIDERS（GPS + NETWORK + FUSED）注入坐标
+     * pushMockLoc — 向 PUSH_PROVIDERS（GPS + NETWORK + FUSED + PASSIVE）注入坐标
      * 附带：
      * 1. 广播 PROVIDERS_CHANGED + GPS_FIX_CHANGE
      * 2. requestSingleUpdate 直接唤醒系统 dispatch
-     * 3. 精度随机、反射隐藏 mock
+     * 3. 按 provider 区分精度策略
+     * 4. 反射隐藏 mock
      */
     private fun pushMockLoc() {
         if (!started.get()) return
@@ -338,14 +349,14 @@ class MockLocationService : Service() {
                             latitude = locArr[0]
                             longitude = locArr[1]
                             altitude = 50.0 + Math.random() * 450.0
-                            accuracy = randomAccuracy()
+                            accuracy = accuracyForProvider(provider)
                             bearing = (Math.random() * 360).toFloat()
                             speed = (5 + (Math.random() * 25).toInt()) / 10f
                             time = now
                             elapsedRealtimeNanos = elapsedNs
                         }
                         hideMockFlag(location)
-                        applyFullAccuracyFields(location)
+                        applyFullAccuracyFields(location, provider)
                         locationManager.setTestProviderLocation(provider, location)
                         injectSatelliteData(provider)
                         // 触发系统位置广播
@@ -391,14 +402,14 @@ class MockLocationService : Service() {
                 latitude = locArr[0]
                 longitude = locArr[1]
                 altitude = 50.0 + Math.random() * 450.0
-                accuracy = randomAccuracy()
+                accuracy = accuracyForProvider(provider)
                 bearing = (Math.random() * 360).toFloat()
-                speed = (5 + (Math.random() * 25).toInt()) / 10f  // 有速度更像真实移动
+                speed = (5 + (Math.random() * 25).toInt()) / 10f
                 time = System.currentTimeMillis()
                 elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
             }
             hideMockFlag(location)
-            applyFullAccuracyFields(location)
+            applyFullAccuracyFields(location, provider)
 
             // requestSingleUpdate 参数：provider, criteria, pendingIntent 或 listener
             // 这里我们用一个临时 listener 来触发 dispatch
@@ -467,14 +478,14 @@ class MockLocationService : Service() {
                 this.latitude = lat
                 this.longitude = lon
                 altitude = 50.0 + Math.random() * 450.0
-                accuracy = randomAccuracy()
+                accuracy = accuracyForProvider(provider)
                 bearing = (Math.random() * 360).toFloat()
                 speed = (5 + (Math.random() * 25).toInt()) / 10f
                 time = System.currentTimeMillis()
                 elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
             }
             hideMockFlag(location)
-            applyFullAccuracyFields(location)
+            applyFullAccuracyFields(location, provider)
             locationManager.setTestProviderLocation(provider, location)
             injectSatelliteData(provider)
             sendLocationBroadcast(provider)
