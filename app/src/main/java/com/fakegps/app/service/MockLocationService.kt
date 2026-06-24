@@ -270,10 +270,10 @@ class MockLocationService : Service() {
                         val location = Location(provider).apply {
                             latitude = locArr[0]
                             longitude = locArr[1]
-                            altitude = 0.0
+                            altitude = 50.0 + Math.random() * 450.0
                             accuracy = randomAccuracy()
-                            bearing = 0f
-                            speed = 0f
+                            bearing = (Math.random() * 360).toFloat()
+                            speed = (5 + (Math.random() * 25).toInt()) / 10f
                             time = now
                             elapsedRealtimeNanos = elapsedNs
                         }
@@ -321,10 +321,10 @@ class MockLocationService : Service() {
             val location = Location(provider).apply {
                 latitude = locArr[0]
                 longitude = locArr[1]
-                altitude = 0.0
+                altitude = 50.0 + Math.random() * 450.0
                 accuracy = randomAccuracy()
-                bearing = 0f
-                speed = 1.0f  // 有速度更像真实移动
+                bearing = (Math.random() * 360).toFloat()
+                speed = (5 + (Math.random() * 25).toInt()) / 10f  // 有速度更像真实移动
                 time = System.currentTimeMillis()
                 elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
             }
@@ -360,10 +360,10 @@ class MockLocationService : Service() {
             val location = Location(provider).apply {
                 this.latitude = lat
                 this.longitude = lon
-                altitude = 0.0
+                altitude = 50.0 + Math.random() * 450.0
                 accuracy = randomAccuracy()
-                bearing = 0f
-                speed = 0f
+                bearing = (Math.random() * 360).toFloat()
+                speed = (5 + (Math.random() * 25).toInt()) / 10f
                 time = System.currentTimeMillis()
                 elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
             }
