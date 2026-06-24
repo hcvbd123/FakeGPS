@@ -44,7 +44,14 @@ class MockLocationService : Service() {
         private val GPS_PROVIDER = LocationManager.GPS_PROVIDER
         private val NETWORK_PROVIDER = LocationManager.NETWORK_PROVIDER
         private val PASSIVE_PROVIDER = LocationManager.PASSIVE_PROVIDER
-        private val MOCK_PROVIDERS = listOf(PASSIVE_PROVIDER, GPS_PROVIDER, NETWORK_PROVIDER)
+        // FakeTraveler(1324⭐) 方案：Android 12+ 支持 mock FUSED_PROVIDER
+        private val FUSED_PROVIDER = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            LocationManager.FUSED_PROVIDER
+        } else {
+            "fused"
+        }
+        private val MOCK_PROVIDERS = listOf(PASSIVE_PROVIDER, GPS_PROVIDER, NETWORK_PROVIDER, FUSED_PROVIDER)
+        private val INTERCEPTOR_PROVIDERS = listOf(PASSIVE_PROVIDER, GPS_PROVIDER, NETWORK_PROVIDER, FUSED_PROVIDER)
 
         private const val INJECT_BG_MS = 100L
         private const val BURST_COUNT = 5
@@ -235,7 +242,7 @@ class MockLocationService : Service() {
             realLocationListener?.let { locationManager.removeUpdates(it) }
             realLocationListener = interceptor
 
-            for (provider in MOCK_PROVIDERS) {
+            for (provider in INTERCEPTOR_PROVIDERS) {
                 try {
                     locationManager.requestLocationUpdates(
                         provider, 0L, 0f, interceptor, handler.looper
@@ -283,11 +290,10 @@ class MockLocationService : Service() {
                     locationManager.removeTestProvider(provider)
                 } catch (_: Exception) { }
                 try {
+                    // ⭐ fused 不需要 requiresSatellite/requiresNetwork（参考FakeTraveler）
                     locationManager.addTestProvider(
                         provider,
-                        provider == NETWORK_PROVIDER,
-                        provider == GPS_PROVIDER,
-                        false, false, true, true, true,
+                        false, false, false, false, false, true, true,
                         android.location.Criteria.POWER_LOW,
                         android.location.Criteria.ACCURACY_FINE
                     )
@@ -316,11 +322,10 @@ class MockLocationService : Service() {
         for (provider in MOCK_PROVIDERS) {
             try { locationManager.removeTestProvider(provider) } catch (_: Exception) { }
             try {
+                // ⭐ fused 不需要 requiresSatellite/requiresNetwork（参考FakeTraveler）
                 locationManager.addTestProvider(
                     provider,
-                    provider == NETWORK_PROVIDER,
-                    provider == GPS_PROVIDER,
-                    false, false, true, true, true,
+                    false, false, false, false, false, true, true,
                     android.location.Criteria.POWER_LOW,
                     android.location.Criteria.ACCURACY_FINE
                 )
