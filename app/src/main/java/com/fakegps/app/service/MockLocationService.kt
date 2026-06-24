@@ -42,9 +42,18 @@ class MockLocationService : Service() {
 
         private val GPS_PROVIDER = LocationManager.GPS_PROVIDER
         private val NETWORK_PROVIDER = LocationManager.NETWORK_PROVIDER
+        private val FUSED_PROVIDER = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            LocationManager.FUSED_PROVIDER
+        } else {
+            "fused"
+        }
 
-        // mock GPS + NETWORK（HMS fused 跟随 NETWORK，所以两个都 mock）
-        private val MOCK_PROVIDERS = listOf(GPS_PROVIDER, NETWORK_PROVIDER)
+        // Mock GPS + NETWORK + FUSED（全量 mock）
+        private val MOCK_PROVIDERS = listOf(GPS_PROVIDER, NETWORK_PROVIDER, FUSED_PROVIDER)
+        // Toggle 序列顺序：network→gps→network→fused
+        private val TOGGLE_SEQUENCE = listOf(
+            NETWORK_PROVIDER, GPS_PROVIDER, NETWORK_PROVIDER, FUSED_PROVIDER
+        )
 
         // 注入间隔 300~500ms 随机 — 降频后 Binder IPC 不饱和，防卡死
         private const val INJECT_MIN_MS = 300L
@@ -152,17 +161,16 @@ class MockLocationService : Service() {
             if (!started.get()) return@launch
             safeInject()
 
-            // 3. Toggle GPS+NETWORK（激活 test provider）
-            for (p in MOCK_PROVIDERS) {
+            // 3. Toggle 序列（仿 Fake Location：关network→开network→关gps→开gps→关network→开network→关fused→开fused）
+            for (p in TOGGLE_SEQUENCE) {
+                if (!started.get()) return@launch
                 try { locationManager.setTestProviderEnabled(p, false) } catch (_: Exception) { }
-            }
-            delay(200)
-            if (!started.get()) return@launch
-            for (p in MOCK_PROVIDERS) {
+                delay(200)
+                if (!started.get()) return@launch
                 try { locationManager.setTestProviderEnabled(p, true) } catch (_: Exception) { }
+                delay(300)
+                if (!started.get()) return@launch
             }
-            delay(300)
-            if (!started.get()) return@launch
 
             // 4. 再次注入确保生效
             safeInject()
