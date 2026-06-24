@@ -4,6 +4,7 @@ import android.content.Context
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Looper
 import androidx.lifecycle.ViewModel
@@ -41,15 +42,13 @@ class DiagnosticViewModel : ViewModel() {
     private var locationManager: LocationManager? = null
     private var currentListener: LocationListener? = null
 
-    /** 添加日志 */
     private fun addLog(msg: String) {
         val ts = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.getDefault())
             .format(java.util.Date())
         val current = _uiState.value.log
         val newLog = current + "[$ts] $msg"
-        // 只保留最后 200 条
         _uiState.value = _uiState.value.copy(
-            log = if (newLog.size > 200) newLog.drop(newLog.size - 200) else newLog
+            log = if (newLog.size > 500) newLog.drop(newLog.size - 500) else newLog
         )
     }
 
@@ -67,23 +66,70 @@ class DiagnosticViewModel : ViewModel() {
         _uiState.value = _uiState.value.copy(isMonitoring = true, log = emptyList())
         addLog("═══ 诊断开始 ═══")
 
-        // 列出所有 provider
         val allProviders = lm.getAllProviders() ?: emptyList()
         addLog("系统所有 Provider: ${allProviders.joinToString(", ")}")
 
-        // 列出测试 provider
-        // 注意：getTestProvider 相关 API 在非 debuggable 下不可用
-        // 我们可以通过检查 provider 是否存在来判断测试 provider
         addLog("正在监听所有位置来源...")
 
-        // 注册监听器
         currentListener = object : LocationListener {
             override fun onLocationChanged(location: Location) {
                 val isMock = try { location.isFromMockProvider } catch (_: Exception) { false }
                 val mockTag = if (isMock) " ⚠️FROM_MOCK" else ""
-                addLog("📍 ${location.provider}: (${"%.6f".format(location.latitude)}, ${"%.6f".format(location.longitude)}) 精度=${location.accuracy}m${mockTag}")
 
-                // 更新实时状态
+                // ===== 完整 Location 字段分析 =====
+                val hasAlt = location.hasAltitude()
+                val altitude = if (hasAlt) "%.1f".format(location.altitude) else "无"
+                val hasSpeed = location.hasSpeed()
+                val speed = if (hasSpeed) "%.2f".format(location.speed) else "无"
+                val hasBearing = location.hasBearing()
+                val bearing = if (hasBearing) "%.1f".format(location.bearing) else "无"
+                val hasAcc = location.hasAccuracy()
+                val accuracyH = if (hasAcc) "%.1f".format(location.accuracy) else "无"
+
+                val hasVertAcc = Build.VERSION.SDK_INT >= 26 && location.hasVerticalAccuracy()
+                val verticalAccuracy = if (hasVertAcc) "%.1f".format(location.verticalAccuracyMeters) else "无(API<26/不可用)"
+
+                val hasSpeedAcc = Build.VERSION.SDK_INT >= 26 && location.hasSpeedAccuracy()
+                val speedAccuracy = if (hasSpeedAcc) "%.2f".format(location.speedAccuracyMetersPerSecond) else "无(API<26/不可用)"
+
+                val hasBearAcc = Build.VERSION.SDK_INT >= 26 && location.hasBearingAccuracy()
+                val bearingAccuracy = if (hasBearAcc) "%.1f".format(location.bearingAccuracyDegrees) else "无(API<26/不可用)"
+
+                val elapsed = location.elapsedRealtimeNanos / 1000000L
+                val timeStr = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                    .format(java.util.Date(location.time))
+
+                val extrasRaw = location.extras
+                val extrasSummary = if (extrasRaw != null) {
+                    val keys = extrasRaw.keySet()
+                    val sb = StringBuilder()
+                    sb.append("Bundle有${keys.size}项: ")
+                    keys.forEach { key ->
+                        val value = try { extrasRaw.get(key)?.toString()?.take(50) } catch (_: Exception) { "??" }
+                        sb.append("$key=$value, ")
+                    }
+                    sb.toString().take(300)
+                } else {
+                    "Bundle: null"
+                }
+
+                // ===== 汇总打印 =====
+                addLog("📍 ${location.provider}: (${"%.6f".format(location.latitude)}, ${"%.6f".format(location.longitude)})${mockTag}")
+                addLog("  ─── ${location.provider} 完整字段对比 ───")
+                addLog("  纬度/经度: ${"%.7f".format(location.latitude)}, ${"%.7f".format(location.longitude)}")
+                addLog("  海拔:         $altitude m    (hasAltitude=${hasAlt})")
+                addLog("  水平精度:     $accuracyH m  (hasAccuracy=${hasAcc})")
+                addLog("  垂直精度:     $verticalAccuracy m   (hasVerticalAccuracy=${hasVertAcc})")
+                addLog("  速度:         $speed m/s    (hasSpeed=${hasSpeed})")
+                addLog("  速度精度:     $speedAccuracy m/s    (hasSpeedAccuracy=${hasSpeedAcc})")
+                addLog("  方向:         $bearing deg  (hasBearing=${hasBearing})")
+                addLog("  方向精度:     $bearingAccuracy deg (hasBearingAccuracy=${hasBearAcc})")
+                addLog("  时间戳:       ${timeStr}")
+                addLog("  启动后时间:   ${elapsed}ms (elapsedRealtimeNanos)")
+                addLog("  模拟标记:     ${isMock} (isFromMockProvider)")
+                addLog("  $extrasSummary")
+                addLog("  toString(): ${location.toString().take(400)}")
+
                 updateProviderStates(lm)
             }
 
@@ -134,15 +180,6 @@ class DiagnosticViewModel : ViewModel() {
             addLog("✅ 成功监听 $successCount 个 provider")
         }
 
-        // 尝试 Fused location provider（GMS）
-        try {
-            val fusedClass = Class.forName("com.google.android.gms.location.FusedLocationProviderClient")
-            addLog("  设备有 GMS FusedLocation，但需要额外 API")
-        } catch (_: ClassNotFoundException) {
-            addLog("  设备无 GMS FusedLocation")
-        }
-
-        // 尝试 HMS FusedLocation
         try {
             val hmsClass = Class.forName("com.huawei.hms.location.FusedLocationProviderClient")
             addLog("  设备有 HMS FusedLocation")
@@ -150,17 +187,14 @@ class DiagnosticViewModel : ViewModel() {
             addLog("  设备无 HMS FusedLocation")
         }
 
-        // 首次扫描 provider 状态
         updateProviderStates(lm)
 
-        // 每秒刷新 provider 状态 + 读取行为日志
         monitorJob?.cancel()
         monitorJob = viewModelScope.launch(Dispatchers.IO) {
             while (isActive) {
                 delay(2000)
                 try {
                     lm?.let { updateProviderStates(it) }
-                    // 从 Service 读取行为日志
                     syncBehaviorLog()
                 } catch (_: Exception) { }
             }
@@ -192,19 +226,12 @@ class DiagnosticViewModel : ViewModel() {
         } catch (_: Exception) { }
     }
 
-    /**
-     * 从 MockLocationService 同步行为日志到诊断 UI
-     */
     private fun syncBehaviorLog() {
         try {
             val serviceLog = MockLocationService.getBehaviorLog()
             if (serviceLog.isEmpty()) return
             val currentLog = _uiState.value.log
-            // 只追加新日志（去重：用 Service 日志的最后一条作为边界）
-            val lastCurrent = if (currentLog.isNotEmpty()) currentLog.last() else ""
-            // 如果最后一条已经存在就不追加
             if (currentLog.contains(serviceLog.last())) return
-            // 追加所有不在当前日志中的 Service 日志
             val toAdd = serviceLog.filter { !currentLog.contains(it) }
             if (toAdd.isEmpty()) return
             val newLog = currentLog + toAdd

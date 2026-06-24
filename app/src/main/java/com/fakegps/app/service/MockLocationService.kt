@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
+import android.os.PowerManager
 import kotlinx.coroutines.*
 import java.lang.reflect.Method
 import java.text.SimpleDateFormat
@@ -36,6 +37,8 @@ class MockLocationService : Service() {
 
         const val ACTION_START = "com.fakegps.START_MOCK"
         const val ACTION_STOP = "com.fakegps.STOP_MOCK"
+        const val ACTION_FOREGROUND = "com.fakegps.FOREGROUND"
+        const val ACTION_BACKGROUND = "com.fakegps.BACKGROUND"
 
         const val EXTRA_LAT = "lat"
         const val EXTRA_LON = "lon"
@@ -118,6 +121,65 @@ class MockLocationService : Service() {
             } catch (_: Exception) { }
         }
 
+        // 反射设置垂直精度（API 26+）
+        private val vertAccMethod = AtomicReference<Method?>(null)
+        private fun setVerticalAccuracy(loc: Location, meters: Float) {
+            if (Build.VERSION.SDK_INT < 26) return
+            try {
+                var m = vertAccMethod.get()
+                if (m == null) {
+                    m = Location::class.java.getDeclaredMethod(
+                        "setVerticalAccuracyMeters", Float::class.javaPrimitiveType
+                    )
+                    m.isAccessible = true
+                    vertAccMethod.set(m)
+                }
+                m!!.invoke(loc, meters)
+            } catch (_: Exception) { }
+        }
+
+        // 反射设置速度精度（API 26+）
+        private val speedAccMethod = AtomicReference<Method?>(null)
+        private fun setSpeedAccuracy(loc: Location, mps: Float) {
+            if (Build.VERSION.SDK_INT < 26) return
+            try {
+                var m = speedAccMethod.get()
+                if (m == null) {
+                    m = Location::class.java.getDeclaredMethod(
+                        "setSpeedAccuracyMetersPerSecond", Float::class.javaPrimitiveType
+                    )
+                    m.isAccessible = true
+                    speedAccMethod.set(m)
+                }
+                m!!.invoke(loc, mps)
+            } catch (_: Exception) { }
+        }
+
+        // 反射设置方向精度（API 26+）
+        private val bearAccMethod = AtomicReference<Method?>(null)
+        private fun setBearingAccuracy(loc: Location, deg: Float) {
+            if (Build.VERSION.SDK_INT < 26) return
+            try {
+                var m = bearAccMethod.get()
+                if (m == null) {
+                    m = Location::class.java.getDeclaredMethod(
+                        "setBearingAccuracyDegrees", Float::class.javaPrimitiveType
+                    )
+                    m.isAccessible = true
+                    bearAccMethod.set(m)
+                }
+                m!!.invoke(loc, deg)
+            } catch (_: Exception) { }
+        }
+
+        // 对一个 Location 应用所有精度字段
+        private fun applyFullAccuracyFields(loc: Location) {
+            loc.accuracy = randomAccuracy()
+            setVerticalAccuracy(loc, 5 + (Math.random() * 30).toFloat())   // 5~35m 垂直精度
+            setSpeedAccuracy(loc, 0.1f + (Math.random() * 1.5f).toFloat())  // 0.1~1.6 m/s 速度精度
+            setBearingAccuracy(loc, 3 + (Math.random() * 25).toFloat())     // 3~28° 方向精度
+        }
+
         @Volatile
         var isRunning = false; private set
 
@@ -137,6 +199,9 @@ class MockLocationService : Service() {
     private var injectJob: Job? = null
 
     private lateinit var locationManager: LocationManager
+    private var powerManager: PowerManager? = null
+    // 前台标记 — 后台时使用爆发注入模式
+    private val isForeground = AtomicBoolean(true)
 
     override fun onCreate() {
         super.onCreate()
@@ -144,6 +209,7 @@ class MockLocationService : Service() {
         try { createNotificationChannel() } catch (_: Exception) { }
         try {
             locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
             addBehaviorLog("✅ 获取 LocationManager 成功")
         } catch (e: Exception) {
             addBehaviorLog("❌ 获取 LocationManager 失败: ${e.message}")
@@ -278,6 +344,7 @@ class MockLocationService : Service() {
                             elapsedRealtimeNanos = elapsedNs
                         }
                         hideMockFlag(location)
+                        applyFullAccuracyFields(location)
                         locationManager.setTestProviderLocation(provider, location)
                         // 触发系统位置广播
                         sendLocationBroadcast(provider)
@@ -329,6 +396,7 @@ class MockLocationService : Service() {
                 elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
             }
             hideMockFlag(location)
+            applyFullAccuracyFields(location)
 
             // requestSingleUpdate 参数：provider, criteria, pendingIntent 或 listener
             // 这里我们用一个临时 listener 来触发 dispatch
@@ -368,6 +436,7 @@ class MockLocationService : Service() {
                 elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
             }
             hideMockFlag(location)
+            applyFullAccuracyFields(location)
             locationManager.setTestProviderLocation(provider, location)
             sendLocationBroadcast(provider)
             triggerSingleUpdate(provider)
