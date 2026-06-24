@@ -169,14 +169,14 @@ class MockLocationService : Service() {
         }
     }
 
-    private fun toggleNetworkOnce(tag: String) {
+    private suspend fun toggleNetworkOnce(tag: String) {
         try { locationManager.setTestProviderEnabled(NETWORK_PROVIDER, false) } catch (_: Exception) { }
         delayOrCancel(200)
         try { locationManager.setTestProviderEnabled(NETWORK_PROVIDER, true) } catch (_: Exception) { }
         delayOrCancel(300)
     }
 
-    private fun toggleGpsOnce() {
+    private suspend fun toggleGpsOnce() {
         try { locationManager.setTestProviderEnabled(GPS_PROVIDER, false) } catch (_: Exception) { }
         delayOrCancel(200)
         try { locationManager.setTestProviderEnabled(GPS_PROVIDER, true) } catch (_: Exception) { }
