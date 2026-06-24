@@ -42,24 +42,28 @@ class MockLocationService : Service() {
 
         private val GPS_PROVIDER = LocationManager.GPS_PROVIDER
         private val NETWORK_PROVIDER = LocationManager.NETWORK_PROVIDER
+        private val PASSIVE_PROVIDER = LocationManager.PASSIVE_PROVIDER
         private val FUSED_PROVIDER = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             LocationManager.FUSED_PROVIDER
         } else {
             "fused"
         }
 
-        // Mock GPS + NETWORK + FUSED（全量 mock）
-        private val MOCK_PROVIDERS = listOf(GPS_PROVIDER, NETWORK_PROVIDER, FUSED_PROVIDER)
-        // Toggle 序列顺序：network→gps→network→fused
+        // Mock GPS + NETWORK + PASSIVE + FUSED（全量 mock）
+        private val MOCK_PROVIDERS = listOf(GPS_PROVIDER, NETWORK_PROVIDER, PASSIVE_PROVIDER, FUSED_PROVIDER)
+        // Toggle 序列顺序：network→gps→network→fused→passive（严格复刻Fake Location）
         private val TOGGLE_SEQUENCE = listOf(
-            NETWORK_PROVIDER, GPS_PROVIDER, NETWORK_PROVIDER, FUSED_PROVIDER
+            NETWORK_PROVIDER, GPS_PROVIDER, NETWORK_PROVIDER, FUSED_PROVIDER, PASSIVE_PROVIDER
         )
 
-        // 注入间隔 300~500ms 随机 — 降频后 Binder IPC 不饱和，防卡死
-        private const val INJECT_MIN_MS = 300L
-        private const val INJECT_MAX_MS = 500L
+        // 注入间隔 150~300ms 随机 — 加快刷新防高德SDK缓存
+        private const val INJECT_MIN_MS = 150L
+        private const val INJECT_MAX_MS = 300L
 
-        private const val MOCK_ACCURACY = 1.2f
+        // 精度随机 1.2~12.0m，小数点后一位
+        private fun randomAccuracy(): Float {
+            return (12 + (Math.random() * 108).toInt()) / 10f
+        }
 
         // 反射隐藏 mock 标记（懒加载线程安全）
         private val hideMockFlagMethod = AtomicReference<Method?>(null)
@@ -218,7 +222,7 @@ class MockLocationService : Service() {
                     latitude = locArr[0]
                     longitude = locArr[1]
                     altitude = 0.0
-                    accuracy = MOCK_ACCURACY
+                    accuracy = randomAccuracy()
                     bearing = 0f
                     speed = 0f
                     time = now
@@ -246,7 +250,7 @@ class MockLocationService : Service() {
                         latitude = locArr[0]
                         longitude = locArr[1]
                         altitude = 0.0
-                        accuracy = MOCK_ACCURACY
+                        accuracy = randomAccuracy()
                         bearing = 0f
                         speed = 0f
                         time = System.currentTimeMillis()
