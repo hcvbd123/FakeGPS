@@ -7,6 +7,7 @@ import android.location.Location
 import android.location.LocationManager
 import android.os.Build
 import android.os.IBinder
+import android.os.Bundle
 import android.os.Looper
 import android.os.SystemClock
 import android.os.PowerManager
@@ -346,6 +347,7 @@ class MockLocationService : Service() {
                         hideMockFlag(location)
                         applyFullAccuracyFields(location)
                         locationManager.setTestProviderLocation(provider, location)
+                        injectSatelliteData(provider)
                         // 触发系统位置广播
                         sendLocationBroadcast(provider)
                         // 直接请求单次更新，强制 dispatch 给所有监听器
@@ -410,6 +412,42 @@ class MockLocationService : Service() {
     }
 
     /**
+     * 注入 GPS 卫星数据 — 模拟真实 GPS 信号，非 root 可用
+     * setTestProviderStatus 是 Android 官方测试 API，在设置了 mock location app 后可直接调用
+     * 注入：卫星数量、PRN编号、信噪比，模拟 GPS 信号锁定状态
+     */
+    private fun injectSatelliteData(provider: String) {
+        try {
+            val extras = Bundle()
+            // 模拟 8~16 颗可见卫星
+            val satCount = 8 + (Math.random() * 8).toInt()
+            extras.putInt("satellites", satCount)
+            extras.putInt("maxSatellites", 24)
+            // 用于定位的卫星数（约60%~80%）
+            val usedInFix = (satCount * (0.6 + Math.random() * 0.2)).toInt()
+            extras.putInt("usedInFix", usedInFix)
+            
+            // 模拟卫星 PRN 编号（GPS卫星编号范围 1~32）
+            val prns = IntArray(satCount) { 1 + (Math.random() * 31).toInt() }
+            extras.putIntArray("satPrns", prns)
+            
+            // 模拟卫星信噪比 SNR（30~50 dBHz 为正常锁定范围）
+            val snrs = FloatArray(satCount) { 30f + (Math.random() * 20).toFloat() }
+            extras.putFloatArray("satSnrs", snrs)
+            
+            // 模拟卫星方向角和仰角
+            val azimuths = FloatArray(satCount) { (Math.random() * 360).toFloat() }
+            extras.putFloatArray("satAzimuths", azimuths)
+            val elevations = FloatArray(satCount) { 5f + (Math.random() * 85).toFloat() }
+            extras.putFloatArray("satElevations", elevations)
+            
+            // 状态: 2 = AVAILABLE
+            locationManager.setTestProviderStatus(provider, 2, extras, System.currentTimeMillis())
+        } catch (_: Exception) { }
+    }
+
+
+    /**
      * 重建失效的 test provider
      */
     private fun rebuildProvider(provider: String, lat: Double, lon: Double) {
@@ -438,6 +476,7 @@ class MockLocationService : Service() {
             hideMockFlag(location)
             applyFullAccuracyFields(location)
             locationManager.setTestProviderLocation(provider, location)
+            injectSatelliteData(provider)
             sendLocationBroadcast(provider)
             triggerSingleUpdate(provider)
         } catch (e: Exception) {
